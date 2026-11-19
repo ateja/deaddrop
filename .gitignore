@@ -6,3 +6,4 @@ __pycache__/
 *.dylib
 .venv/
 .pytest_cache/
+samples/cpp_listener/build/

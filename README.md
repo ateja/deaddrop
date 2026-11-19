@@ -11,9 +11,23 @@ crates/
     include/deaddrop.h     C header
     include/deaddrop.hpp   header only C++17 RAII wrapper
     examples/consumer.cpp      C++ consumer agent
+samples/
+  python_publisher/    Python program that publishes detections
+  cpp_listener/        C++ program (CMake) that listens and collects
+  run_demo.sh          builds both and runs them together
   deaddrop-py/     Python wheel via PyO3 + maturin (pip install deaddrop-ipc)
 .github/workflows/ci.yml       tests on macOS, Windows, Linux; builds wheels
 ```
+
+## Try it
+
+`samples/` has a Python publisher and a C++ listener that talk through deaddrop. Inside a Python virtualenv with maturin installed:
+
+```bash
+samples/run_demo.sh 5
+```
+
+See [samples/README.md](samples/README.md) for the two terminal walkthrough.
 
 ## How it works
 
@@ -163,7 +177,7 @@ Treat these as a sanity check, not a macOS or Windows number. FSEvents and `Read
 - `start_watching()` is non blocking: it spawns the watcher thread and returns. The proposal's step 4 (`shutdown`) only makes sense that way.
 - `publish_event` is synchronous, not fire and forget. It returns once the event is durable and visible, typically about 1 ms. Making it async would mean an unacknowledged in-memory queue that can lose events on crash.
 - Added: retention (the proposal did not say who deletes files; consumers are read only, so the producer prunes), directory trust checks on the consumer, a periodic safety rescan, size limits, and `seq_id`/file name cross checks.
-- The doc's code samples had small errors, fixed here: `rom deaddrop import` (missing `f`), the Rust consumer was missing `Ok(())`/closing brace, and two sections were numbered 2.
+- The doc's code samples had small errors, fixed here: `rom endpoint_ipc import` (missing `f`; the library was then called endpoint-ipc), the Rust consumer was missing `Ok(())`/closing brace, and two sections were numbered 2.
 
 ## Swapping the transport
 

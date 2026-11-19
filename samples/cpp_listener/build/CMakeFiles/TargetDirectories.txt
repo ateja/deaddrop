@@ -1,3 +1,0 @@
-/home/user/deaddrop/samples/cpp_listener/build/CMakeFiles/listener.dir
-/home/user/deaddrop/samples/cpp_listener/build/CMakeFiles/edit_cache.dir
-/home/user/deaddrop/samples/cpp_listener/build/CMakeFiles/rebuild_cache.dir
