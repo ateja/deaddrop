@@ -4,7 +4,7 @@
 Every published event is printed to stdout. Pair it with the C++ listener in
 samples/cpp_listener, pointed at the same directory.
 
-    pip install deaddrop-ipc          # or: cd crates/deaddrop-py && maturin develop
+    pip install ./crates/deaddrop-py  # from the repo root, inside a venv
     python publisher.py --count 10 --interval 0.5
 """
 
