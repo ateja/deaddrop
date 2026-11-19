@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/deaddrop",
+    "crates/deaddrop-ffi",
+    "crates/deaddrop-py",
+]
+# The Python extension links against libpython only when loaded by the
+# interpreter, so it is built with maturin rather than plain `cargo test`.
+default-members = ["crates/deaddrop", "crates/deaddrop-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+publish = false
+
+[workspace.dependencies]
+deaddrop = { path = "crates/deaddrop" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+notify = "8"
+log = "0.4"
+libc = "0.2"
+windows-sys = "0.59"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

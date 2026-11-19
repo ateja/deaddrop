@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust tests (core + C ABI)
+        run: cargo test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python wheel + tests
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ -f .venv/Scripts/activate ]; then source .venv/Scripts/activate; else source .venv/bin/activate; fi
+          pip install "maturin>=1.7,<2" pytest
+          cd crates/deaddrop-py
+          maturin develop --release
+          python -m pytest tests -q
+      - name: Latency sample
+        run: cargo run --release --example latency -p deaddrop -- 1000
+
+  wheels:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: universal2-apple-darwin
+          - os: windows-latest
+            target: x64
+          - os: ubuntu-latest
+            target: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/deaddrop-py
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: crates/deaddrop-py/dist/*.whl

@@ -1,0 +1,19 @@
+[package]
+name = "deaddrop-ffi"
+description = "C ABI for deaddrop (header: include/deaddrop.h, C++ wrapper: include/deaddrop.hpp)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "deaddrop"
+crate-type = ["cdylib", "staticlib", "rlib"]
+doctest = false
+
+[dependencies]
+deaddrop.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
