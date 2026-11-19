@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/listener.dir/listener.cpp.o -o listener   -L/home/user/deaddrop/target/release  -Wl,-rpath,/home/user/deaddrop/target/release -ldeaddrop 
