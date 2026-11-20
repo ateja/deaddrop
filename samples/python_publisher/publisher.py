@@ -35,7 +35,16 @@ SAMPLE_APPS = [
 
 def parse_args():
     p = argparse.ArgumentParser(description="Publish sample detection events.")
-    p.add_argument("--dir", default=DEFAULT_DIR, help=f"shared directory (default: {DEFAULT_DIR})")
+    p.add_argument(
+        "--config",
+        default=None,
+        help="deaddrop YAML selecting file or ipc transport (same as DEADDROP_CONFIG)",
+    )
+    p.add_argument(
+        "--dir",
+        default=DEFAULT_DIR,
+        help=f"shared directory for the file transport (default: {DEFAULT_DIR})",
+    )
     p.add_argument("--count", type=int, default=10, help="events to publish; 0 = until Ctrl+C (default: 10)")
     p.add_argument("--interval", type=float, default=0.5, help="seconds between events (default: 0.5)")
     p.add_argument(
@@ -70,6 +79,9 @@ def make_event(seq_id, rng):
 
 def main():
     args = parse_args()
+    if args.config:
+        # Same effect as starting the program with DEADDROP_CONFIG=<file>.
+        os.environ["DEADDROP_CONFIG"] = args.config
     if args.debug:
         set_log_level("debug")
     rng = random.Random(args.seed)
@@ -81,7 +93,7 @@ def main():
         print(f"[publisher] cannot open {args.dir}: {e}", file=sys.stderr)
         return 1
 
-    print(f"[publisher] writing to {args.dir}", flush=True)
+    print(f"[publisher] sending via {producer.endpoint}", flush=True)
     seqs = itertools.count(start) if args.count == 0 else range(start, start + args.count)
     published = 0
     try:

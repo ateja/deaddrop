@@ -32,10 +32,12 @@
 //! # Ok(()) }
 //! ```
 
+pub mod config;
 mod consumer;
 mod error;
 mod event;
 pub mod file;
+pub mod ipc;
 pub mod logging;
 mod producer;
 mod transport;

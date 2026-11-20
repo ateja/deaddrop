@@ -210,3 +210,32 @@ def test_set_log_level(tmp_path, capfd):
     assert "[deaddrop:producer]" in err
     assert "atomic rename .tmp-" in err
     assert "now visible to consumers" in err
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="an XPC listener must run under launchd")
+def test_ipc_transport_selected_by_yaml(tmp_path):
+    cfg = tmp_path / "deaddrop.yaml"
+    cfg.write_text(
+        "transport: ipc\n"
+        "ipc:\n"
+        f"  name: com.deaddrop.pytest.{os.getpid()}\n"
+        "  trusted_peer: current_user\n"
+    )
+    consumer, q = make_consumer(cfg)
+    try:
+        assert consumer.endpoint.startswith("ipc: "), consumer.endpoint
+        with EventProducer.init(cfg) as producer:
+            assert producer.endpoint.startswith("ipc: "), producer.endpoint
+            for i in range(20):
+                producer.publish_event(DetectionEvent(i, "A", metadata={"i": i}))
+        got = [q.get(timeout=WAIT) for _ in range(20)]
+    finally:
+        consumer.shutdown()
+    assert [e.seq_id for e in got] == list(range(20))
+    assert got[3].metadata == {"i": 3}
+    assert not (tmp_path / "events").exists(), "ipc must not touch disk"
+
+
+def test_file_transport_endpoint(tmp_path):
+    p = EventProducer.init(tmp_path / "events")
+    assert p.endpoint == f"file: {tmp_path / 'events'}"

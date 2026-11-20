@@ -28,6 +28,9 @@ pub enum Error {
     #[error("file system watcher error: {0}")]
     Watcher(String),
 
+    #[error("IPC error: {0}")]
+    Ipc(String),
+
     #[error("consumer is already watching")]
     AlreadyWatching,
 

@@ -1,7 +1,11 @@
 // Sample consumer: listens for detection events, prints each one as it
 // arrives, collects them, and prints a summary on exit.
 //
-//   listener [--dir PATH] [--count N] [--timeout SECONDS] [--trust MODE] [--new-only] [--debug]
+//   listener [--config FILE] [--dir PATH] [--count N] [--timeout SECONDS] [--trust MODE]
+//            [--new-only] [--debug]
+//
+// The transport (file or ipc) comes from the deaddrop YAML config named by
+// --config or DEADDROP_CONFIG; without one it is the file transport in --dir.
 //
 // Stops after N events (--count), after --timeout seconds, or on Ctrl+C.
 // Exit code: 0 on success, 1 on error, 2 if --count was not reached in time.
@@ -38,18 +42,21 @@ struct Options {
     dd_trusted_owner trust = DD_OWNER_CURRENT_USER;
     bool replay_existing = true;
     bool debug = false;
+    std::string config;  // empty = use DEADDROP_CONFIG if set
 };
 
 [[noreturn]] void usage(const char *argv0, int code) {
     std::fprintf(code ? stderr : stdout,
-                 "usage: %s [--dir PATH] [--count N] [--timeout SECONDS]\n"
+                 "usage: %s [--config FILE] [--dir PATH] [--count N] [--timeout SECONDS]\n"
                  "          [--trust privileged|current-user|any] [--new-only] [--debug]\n"
                  "\n"
-                 "  --dir       shared directory (default: <temp>/deaddrop-demo/events)\n"
+                 "  --config    deaddrop YAML selecting file or ipc (same as DEADDROP_CONFIG)\n"
+                 "  --dir       shared directory for the file transport\n"
+                 "              (default: <temp>/deaddrop-demo/events)\n"
                  "  --count     stop after N events (default: run until Ctrl+C)\n"
                  "  --timeout   stop after this many seconds\n"
-                 "  --trust     who must own the directory (default: current-user;\n"
-                 "              production deployments should use privileged)\n"
+                 "  --trust     who the producer must run as (owner of the directory, or\n"
+                 "              the IPC peer); default current-user; production: privileged\n"
                  "  --new-only  ignore events already on disk at startup\n"
                  "  --debug     print the library's internal steps to stderr\n"
                  "              (same as DEADDROP_LOG=debug)\n",
@@ -67,6 +74,8 @@ Options parse(int argc, char **argv) {
         };
         if (a == "--dir") {
             o.dir = value();
+        } else if (a == "--config") {
+            o.config = value();
         } else if (a == "--count") {
             o.count = std::strtol(value().c_str(), nullptr, 10);
         } else if (a == "--timeout") {
@@ -94,6 +103,14 @@ Options parse(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     const Options opt = parse(argc, argv);
+    if (!opt.config.empty()) {
+        // Same effect as starting the program with DEADDROP_CONFIG=<file>.
+#ifdef _WIN32
+        _putenv_s("DEADDROP_CONFIG", opt.config.c_str());
+#else
+        setenv("DEADDROP_CONFIG", opt.config.c_str(), 1);
+#endif
+    }
     if (opt.debug) deaddrop::set_log_level("debug");
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -104,26 +121,31 @@ int main(int argc, char **argv) {
                std::chrono::duration<double>(Clock::now() - started).count() >= opt.timeout_s;
     };
 
-    // The publisher creates the directory. Wait for it so the two programs
-    // can be started in either order.
-    if (!fs::exists(opt.dir)) {
-        std::printf("[listener] waiting for %s to be created by the publisher...\n", opt.dir.c_str());
-        std::fflush(stdout);
-        while (!fs::exists(opt.dir)) {
-            if (g_stop || timed_out()) {
-                std::fprintf(stderr, "[listener] directory never appeared\n");
-                return 2;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        }
-    }
-
     std::mutex mu;
     std::condition_variable cv;
     std::vector<deaddrop::DetectionEvent> collected;
 
     try {
+        // The config (if any) decides the transport; the directory is only
+        // used by the file transport.
         deaddrop::Consumer consumer(opt.dir, opt.trust, opt.replay_existing);
+        const std::string endpoint = consumer.endpoint();
+        const bool file_mode = endpoint.rfind("file:", 0) == 0;
+
+        // The publisher creates the directory. Wait for it so the two
+        // programs can be started in either order. (With IPC the listener
+        // is the one that opens the endpoint, so there is nothing to wait for.)
+        if (file_mode && !fs::exists(opt.dir)) {
+            std::printf("[listener] waiting for %s to be created by the publisher...\n", opt.dir.c_str());
+            std::fflush(stdout);
+            while (!fs::exists(opt.dir)) {
+                if (g_stop || timed_out()) {
+                    std::fprintf(stderr, "[listener] directory never appeared\n");
+                    return 2;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+        }
 
         // Runs on the library's watcher thread, one event at a time.
         consumer.register_event_listener([&](const deaddrop::DetectionEvent &e) {
@@ -137,7 +159,7 @@ int main(int argc, char **argv) {
         });
 
         consumer.start_watching();
-        std::printf("[listener] watching %s (Ctrl+C to stop)\n", opt.dir.c_str());
+        std::printf("[listener] receiving via %s (Ctrl+C to stop)\n", endpoint.c_str());
         std::fflush(stdout);
 
         {

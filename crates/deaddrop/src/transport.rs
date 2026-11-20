@@ -13,6 +13,10 @@ pub trait ProducerTransport: Send + Sync {
     fn publish(&self, event: &DetectionEvent) -> Result<()>;
     /// Releases resources. Must be idempotent.
     fn shutdown(&self) -> Result<()>;
+    /// Where events go, for logs and diagnostics (e.g. `file: /path`).
+    fn describe(&self) -> String {
+        "custom transport".to_owned()
+    }
 }
 
 /// Backend a consumer reads through.
@@ -21,6 +25,10 @@ pub trait ConsumerTransport: Send {
     fn start(&mut self, dispatcher: Dispatcher) -> Result<()>;
     /// Stops delivery and joins any worker. Must be idempotent.
     fn stop(&mut self) -> Result<()>;
+    /// Where events come from, for logs and diagnostics.
+    fn describe(&self) -> String {
+        "custom transport".to_owned()
+    }
 }
 
 /// Fans an event out to every registered listener. A panicking listener is

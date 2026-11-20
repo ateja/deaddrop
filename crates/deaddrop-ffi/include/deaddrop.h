@@ -35,7 +35,8 @@ typedef enum dd_status {
     DD_ERR_WATCHER = 5,
     DD_ERR_INVALID_STATE = 6,
     DD_ERR_SERIALIZATION = 7,
-    DD_ERR_PANIC = 8
+    DD_ERR_PANIC = 8,
+    DD_ERR_IPC = 9
 } dd_status;
 
 typedef enum dd_trusted_owner {
@@ -72,7 +73,13 @@ dd_status dd_set_log_level(const char *level);
 
 /* Producer ------------------------------------------------------------ */
 
+/* `dir` is the shared directory, or a deaddrop .yaml config file. If the
+ * DEADDROP_CONFIG environment variable names a .yaml file, that file selects
+ * the transport ("file" or "ipc") and `dir` is the default directory. */
 dd_status dd_producer_init(const char *dir, dd_producer **out);
+/* Transport in use, e.g. "file: /path" or "ipc: XPC service com.example".
+ * Owned by the producer, valid until dd_producer_free. */
+const char *dd_producer_endpoint(const dd_producer *producer);
 dd_status dd_producer_publish(const dd_producer *producer, uint64_t seq_id,
                                   const char *app_name, const char *metadata_json /* nullable */);
 dd_status dd_producer_publish_json(const dd_producer *producer, const char *json, size_t len);
@@ -88,6 +95,8 @@ dd_status dd_consumer_init_ex(const char *dir, dd_trusted_owner trusted_owner,
                                   dd_consumer **out);
 dd_status dd_consumer_register_listener(dd_consumer *consumer, dd_event_callback callback,
                                             void *user_data);
+/* Transport in use. Owned by the consumer, valid until dd_consumer_free. */
+const char *dd_consumer_endpoint(const dd_consumer *consumer);
 dd_status dd_consumer_start(dd_consumer *consumer);
 /* Joins the watcher thread: when it returns, no callback is running. */
 dd_status dd_consumer_shutdown(dd_consumer *consumer);

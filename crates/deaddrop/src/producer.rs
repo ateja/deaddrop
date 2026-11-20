@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::config::{self, Resolved};
 use crate::file::FileProducer;
+use crate::ipc::IpcProducer;
+use crate::logging::PRODUCER;
 use crate::transport::ProducerTransport;
 use crate::{DetectionEvent, Error, Result, DEFAULT_MAX_EVENT_BYTES};
 
@@ -99,9 +102,31 @@ pub struct EventProducer {
 }
 
 impl EventProducer {
-    /// Opens (or securely creates) `dir` with default settings.
-    pub fn init(dir: impl AsRef<Path>) -> Result<Self> {
-        Self::with_config(ProducerConfig::new(dir.as_ref()))
+    /// Opens the transport for `target`.
+    ///
+    /// `target` is normally the shared directory (file transport). If it is a
+    /// `.yaml` file, or `DEADDROP_CONFIG` names one, that configuration picks
+    /// the transport at runtime: see [`crate::config`].
+    pub fn init(target: impl AsRef<Path>) -> Result<Self> {
+        Self::init_with(target, |_| {})
+    }
+
+    /// Like [`Self::init`], and `tune` can adjust the file transport's
+    /// settings (it is not called when the configuration selects IPC).
+    pub fn init_with(
+        target: impl AsRef<Path>,
+        tune: impl FnOnce(&mut ProducerConfig),
+    ) -> Result<Self> {
+        match config::resolve(target.as_ref(), PRODUCER)? {
+            Resolved::File(dir) => {
+                let mut cfg = ProducerConfig::new(dir);
+                tune(&mut cfg);
+                Self::with_config(cfg)
+            }
+            Resolved::Ipc(settings) => {
+                Ok(Self::with_transport(Box::new(IpcProducer::new(settings)?)))
+            }
+        }
     }
 
     /// Opens the file transport with explicit settings.
@@ -138,6 +163,12 @@ impl EventProducer {
 
     pub fn is_shut_down(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// Which transport and endpoint this producer uses, e.g.
+    /// `file: /var/run/vendor_ipc/events` or `ipc: named pipe \\.\pipe\name`.
+    pub fn endpoint(&self) -> String {
+        self.transport.describe()
     }
 }
 

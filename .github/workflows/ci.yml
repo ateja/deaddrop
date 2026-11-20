@@ -6,6 +6,7 @@ on:
 
 jobs:
   test:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -32,13 +33,21 @@ jobs:
           cd crates/deaddrop-py
           maturin develop --release
           python -m pytest tests -q
-      - name: Samples demo (Python publisher -> C++ listener)
+      - name: Samples demo, file transport (Python publisher -> C++ listener)
         shell: bash
         run: |
           if [ -f .venv/Scripts/activate ]; then source .venv/Scripts/activate; else source .venv/bin/activate; fi
-          samples/run_demo.sh 5
-      - name: Latency sample
+          samples/run_demo.sh 5 file
+      - name: Samples demo, ipc transport (named pipe / XPC via launchd / Unix socket)
+        shell: bash
+        run: |
+          if [ -f .venv/Scripts/activate ]; then source .venv/Scripts/activate; else source .venv/bin/activate; fi
+          samples/run_demo.sh 5 ipc
+      - name: Latency sample, file transport
         run: cargo run --release --example latency -p deaddrop -- 1000
+      - name: Latency sample, ipc transport (not macOS, where the XPC listener needs launchd)
+        if: runner.os != 'macOS'
+        run: cargo run --release --example latency -p deaddrop -- 1000 --ipc
 
   # Follows "Run the samples (from a fresh clone)" in README.md command for
   # command, so the documented steps stay correct on every OS.

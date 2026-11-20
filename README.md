@@ -174,7 +174,69 @@ Consumer (Rust / C++)                      watcher thread wakes
 
 The OS notification is only a wakeup. The directory listing is the source of truth, so coalesced, duplicated or reordered notifications cannot cause missed or double deliveries. A periodic rescan (default 5 s) covers the case where the OS drops notifications entirely, which FSEvents can do under heavy load.
 
-## Guarantees
+## Transports: file or IPC
+
+Two implementations sit behind the same `EventProducer` / `EventConsumer` API. Which one runs is decided at runtime by a YAML file; producer and consumer code does not change.
+
+| | `file` (default) | `ipc` |
+|---|---|---|
+| Windows | shared folder + `ReadDirectoryChangesW` | named pipe `\\.\pipe\<name>` |
+| macOS | shared folder + FSEvents | XPC Mach service `<name>` |
+| Linux | shared folder + inotify | Unix socket `/tmp/<name>.sock` |
+| Events survive a producer crash or restart | yes (fsynced files) | no: undelivered events live in the producer's memory |
+| Consumer can start later and catch up | yes (`replay_existing`) | only events still queued in a running producer (`ipc.max_pending`, default 1,024) |
+| Consumers per producer | any number | one per endpoint name (a second one is refused) |
+| Touches disk | yes | no |
+| `publish_event` returns after, p50 (Linux, measured) | 0.84 ms (fsync) | 0.009 ms (queued) |
+| Publish to callback, p50 / p95 (Linux, measured) | 1.23 / 2.12 ms | 0.043 / 0.057 ms |
+| Publish to callback, p50 / p95 (Windows CI runner, measured) | 8.44 / 12.04 ms | 0.050 / 0.067 ms |
+| macOS setup | none | the consumer must run under launchd (see below) |
+
+### Choosing at runtime
+
+`init(path)` keeps its signature. It looks for a config in this order:
+
+1. `path` itself, if it is a `.yaml` / `.yml` file.
+2. The file named by the `DEADDROP_CONFIG` environment variable; `path` is then the default folder for the file transport.
+3. Neither: the file transport in `path`, exactly as before configs existed.
+
+```yaml
+transport: ipc            # file | ipc
+file:
+  dir: /var/run/vendor_ipc/events   # optional when init() is given a folder
+ipc:
+  name: com.example.deaddrop        # pipe / XPC service / socket name, same on both sides
+  trusted_peer: privileged          # privileged | current_user | any
+  max_pending: 1024                 # producer queue while the consumer is unreachable
+  flush_timeout_ms: 5000            # how long shutdown() keeps delivering
+```
+
+Unknown keys and values are errors, so a typo never silently falls back to the other transport. `endpoint()` (Rust), `.endpoint` (Python), `dd_producer_endpoint()` / `endpoint()` (C/C++) report what was chosen, e.g. `ipc: named pipe \\.\pipe\com.example.deaddrop`. [samples/deaddrop.yaml](samples/deaddrop.yaml) is a commented example.
+
+### How the IPC transport works
+
+The consumer listens; the producer connects. `publish_event` puts the event in a bounded in-memory queue and returns; a delivery thread sends it, connecting and reconnecting with backoff (50 ms up to 1 s), so a producer may start before its consumer. Events arrive in publish order. `shutdown()` waits up to `flush_timeout_ms` for the queue to drain, then drops what is left with a warning.
+
+- **Named pipes (Windows):** byte mode, inbound only, `PIPE_REJECT_REMOTE_CLIENTS`, and `FILE_FLAG_FIRST_PIPE_INSTANCE` so no other process can take the name while the consumer runs. Frames are a `DDP1` handshake, then length-prefixed JSON.
+- **XPC (macOS):** each event is an XPC dictionary sent with a synchronous reply, so a send only counts once the consumer has it.
+- **Unix sockets (Linux):** same framing as pipes; the socket is `0600` unless the policy needs other accounts.
+
+Both sides check who is on the other end before any event crosses: the consumer checks the producer and the producer checks the consumer, using the same policies as the file transport's folder checks (`privileged` means root, SYSTEM or Administrators). The OS supplies the identity: `SO_PEERCRED` on Linux, the XPC peer's euid on macOS, the client process token and the pipe's owner on Windows. A consumer's policy comes from `ipc.trusted_peer` if set, else from its code (`trusted_owner`); a producer's from `ipc.trusted_peer`, else `privileged`.
+
+### macOS: the consumer runs under launchd
+
+macOS only lets a process listen on an XPC Mach service that launchd registered for it. Measured in CI: a listener started any other way fails at once with `Connection invalid`, and deaddrop turns that into an error naming the fix. In production the consumer is a LaunchDaemon (or LaunchAgent) whose plist declares the service:
+
+```xml
+<key>Label</key><string>com.example.agent</string>
+<key>ProgramArguments</key><array><string>/usr/local/bin/agent</string></array>
+<key>MachServices</key><dict><key>com.example.deaddrop</key><true/></dict>
+<key>EnvironmentVariables</key><dict><key>DEADDROP_CONFIG</key><string>/etc/example/deaddrop.yaml</string></dict>
+```
+
+launchd then also starts the consumer on demand when a producer connects. `samples/run_demo.sh` writes and loads a plist like this for the length of the demo, and removes it afterwards. Producers need nothing special.
+
+## Guarantees (file transport)
 
 | Property | How |
 |---|---|
@@ -325,7 +387,7 @@ Treat these as a sanity check, not a macOS or Windows number. FSEvents and `Read
 
 ## Swapping the transport
 
-`EventProducer::with_transport` and `EventConsumer::with_transport` accept any `ProducerTransport` / `ConsumerTransport`. A named pipe or Unix socket backend can be added without changing producer or consumer call sites.
+The YAML config switches between the two built-in transports. For anything else, `EventProducer::with_transport` and `EventConsumer::with_transport` accept any `ProducerTransport` / `ConsumerTransport` implementation, again without changing producer or consumer call sites.
 
 ## Known limitations and next steps
 

@@ -25,6 +25,8 @@ log = "0.4"
 libc = "0.2"
 windows-sys = "0.59"
 tempfile = "3"
+serde_norway = "0.9"
+block2 = "0.6"
 
 [profile.release]
 lto = "thin"

@@ -1,0 +1,36 @@
+# deaddrop runtime configuration for the samples.
+#
+# Change `transport` and rerun; no code changes or rebuilds needed:
+#   samples/run_demo.sh 5          # uses this file
+#   samples/run_demo.sh 5 ipc      # same, but overrides transport for one run
+#
+# EventProducer.init(...) / EventConsumer.init(...) read this file when the
+# DEADDROP_CONFIG environment variable points at it (run_demo.sh and the
+# samples' --config flag set it), or when a program passes the .yaml path to
+# init() directly.
+
+# file: events are files in a shared directory (atomic write + rename,
+#       picked up by the OS file watcher). Survives restarts of either side.
+# ipc:  events go straight to the consumer over OS IPC:
+#         Windows  named pipe   \\.\pipe\<ipc.name>
+#         macOS    XPC service  <ipc.name>   (consumer must run under launchd)
+#         Linux    Unix socket  /tmp/<ipc.name>.sock
+#       Nothing touches disk; events published while no consumer is
+#       listening wait in the producer's memory (up to ipc.max_pending).
+transport: file
+
+file:
+  # Shared directory. Default: the directory the program passes to init()
+  # (the samples' --dir, which run_demo.sh sets to a fresh temp folder).
+  # dir: /var/run/vendor_ipc/events
+
+ipc:
+  # Endpoint name both sides must agree on: letters, digits, '.', '_', '-'.
+  name: com.deaddrop.demo
+  # Who may be on the other end: privileged (root / SYSTEM / Administrators),
+  # current_user, or any. current_user suits the demo; production: privileged.
+  trusted_peer: current_user
+  # Events the producer holds while the consumer is unreachable (oldest dropped).
+  max_pending: 1024
+  # How long the producer's shutdown() keeps trying to deliver queued events.
+  flush_timeout_ms: 5000
