@@ -43,8 +43,11 @@ jobs:
         run: |
           if [ -f .venv/Scripts/activate ]; then source .venv/Scripts/activate; else source .venv/bin/activate; fi
           samples/run_demo.sh 5 ipc
-      - name: Latency sample
+      - name: Latency sample, file transport
         run: cargo run --release --example latency -p deaddrop -- 1000
+      - name: Latency sample, ipc transport (not macOS, where the XPC listener needs launchd)
+        if: runner.os != 'macOS'
+        run: cargo run --release --example latency -p deaddrop -- 1000 --ipc
 
   wheels:
     needs: test

@@ -7,7 +7,24 @@ Two small programs that talk only through deaddrop:
 | `python_publisher/publisher.py` | Publishes simulated events from a set of fictional apps (Contoso Mail, Fabrikam Notes, ...) | `[publisher] sent seq=... app=... metadata=...` for each event |
 | `cpp_listener/listener.cpp` | Listens, prints and collects every event; prints a per app summary on exit | `[listener] recv #n seq=... app=... metadata=...`, then a summary |
 
-Neither program knows about the other. They only agree on the directory.
+Neither program knows about the other. They only agree on where events go: a shared folder (file transport) or an IPC endpoint name (ipc transport), set in [`deaddrop.yaml`](deaddrop.yaml).
+
+## File or IPC
+
+`run_demo.sh` reads [`samples/deaddrop.yaml`](deaddrop.yaml). Change `transport: file` to `transport: ipc` and run it again, or override it for one run:
+
+```bash
+samples/run_demo.sh 5 ipc
+```
+
+| `transport` | Windows | macOS | Linux |
+|---|---|---|---|
+| `file` | shared folder | shared folder | shared folder |
+| `ipc` | named pipe `\\.\pipe\com.deaddrop.demo` | XPC service `com.deaddrop.demo` | Unix socket `/tmp/com.deaddrop.demo.sock` |
+
+With `ipc` on macOS, the script registers the listener as a temporary launchd agent, because macOS only lets launchd-registered processes listen on an XPC service. It prints `(listener started by launchd as gui/501/...)` and removes the agent when the run ends.
+
+To run the programs by hand with a config, pass `--config samples/deaddrop.yaml` to both, or `export DEADDROP_CONFIG=$PWD/samples/deaddrop.yaml`. On macOS the IPC listener must be started by launchd; see the main README.
 
 ## One command
 
@@ -81,7 +98,8 @@ Both default to `<temp>/deaddrop-demo/events`, so no flags are needed. Start the
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir PATH` | `<temp>/deaddrop-demo/events` | shared directory |
+| `--config FILE` | `DEADDROP_CONFIG` | deaddrop YAML selecting file or ipc |
+| `--dir PATH` | `<temp>/deaddrop-demo/events` | shared directory (file transport) |
 | `--count N` | 10 | events to send; `0` = until Ctrl+C |
 | `--interval S` | 0.5 | seconds between events |
 | `--start-seq N` | current Unix time in ms | first `seq_id` (monotonic across runs) |
@@ -92,10 +110,11 @@ Both default to `<temp>/deaddrop-demo/events`, so no flags are needed. Start the
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dir PATH` | `<temp>/deaddrop-demo/events` | shared directory |
+| `--config FILE` | `DEADDROP_CONFIG` | deaddrop YAML selecting file or ipc |
+| `--dir PATH` | `<temp>/deaddrop-demo/events` | shared directory (file transport) |
 | `--count N` | unlimited | exit after N events |
 | `--timeout S` | none | exit after S seconds |
-| `--trust MODE` | `current-user` | who must own the directory: `privileged`, `current-user`, `any` |
+| `--trust MODE` | `current-user` | who the producer must run as (folder owner, or IPC peer): `privileged`, `current-user`, `any`. `ipc.trusted_peer` in the YAML overrides it |
 | `--new-only` | off | ignore events already on disk |
 | `--debug` | off | print the library's internal steps to stderr (same as `DEADDROP_LOG=debug`) |
 

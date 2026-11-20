@@ -192,7 +192,8 @@ case "$TRANSPORT" in
     esac ;;
   *) WHERE="shared folder $DIR" ;;
 esac
-echo "==> transport: $TRANSPORT ($WHERE), from $SOURCE_CONFIG${TRANSPORT_OVERRIDE:+ (overridden on the command line)}"
+# printf, not echo: some bash builds treat "\c" (as in \\.\pipe\com...) as "stop output".
+printf '==> transport: %s (%s), from %s%s\n' "$TRANSPORT" "$WHERE" "$SOURCE_CONFIG" "${TRANSPORT_OVERRIDE:+ (overridden on the command line)}"
 echo "==> running: listener waits for $COUNT events, publisher sends $COUNT (DEADDROP_LOG=$DEADDROP_LOG)"
 echo
 echo "    legend:"
