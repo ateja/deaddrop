@@ -77,6 +77,8 @@ name = re.search(r"(?m)^[ \t]+name:[ \t]*[\"']?([A-Za-z0-9._-]+)", section.group
 print(m.group(1) if m else "file", name.group(1) if name else "com.deaddrop.events")
 PY
 )
+# Windows Python ends lines with \r\n; drop the \r that read leaves behind.
+TRANSPORT="${TRANSPORT%$'\r'}" IPC_NAME="${IPC_NAME%$'\r'}"
 export DEADDROP_CONFIG="$CONFIG"
 
 # ---- Behind the scenes ------------------------------------------------------
@@ -192,7 +194,6 @@ case "$TRANSPORT" in
     esac ;;
   *) WHERE="shared folder $DIR" ;;
 esac
-# printf, not echo: some bash builds treat "\c" (as in \\.\pipe\com...) as "stop output".
 printf '==> transport: %s (%s), from %s%s\n' "$TRANSPORT" "$WHERE" "$SOURCE_CONFIG" "${TRANSPORT_OVERRIDE:+ (overridden on the command line)}"
 echo "==> running: listener waits for $COUNT events, publisher sends $COUNT (DEADDROP_LOG=$DEADDROP_LOG)"
 echo

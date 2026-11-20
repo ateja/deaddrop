@@ -63,6 +63,7 @@ Two implementations sit behind the same `EventProducer` / `EventConsumer` API. W
 | Touches disk | yes | no |
 | `publish_event` returns after, p50 (Linux, measured) | 0.84 ms (fsync) | 0.009 ms (queued) |
 | Publish to callback, p50 / p95 (Linux, measured) | 1.23 / 2.12 ms | 0.043 / 0.057 ms |
+| Publish to callback, p50 / p95 (Windows CI runner, measured) | 8.44 / 12.04 ms | 0.050 / 0.067 ms |
 | macOS setup | none | the consumer must run under launchd (see below) |
 
 ### Choosing at runtime
