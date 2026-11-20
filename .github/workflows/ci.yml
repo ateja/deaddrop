@@ -33,11 +33,16 @@ jobs:
           cd crates/deaddrop-py
           maturin develop --release
           python -m pytest tests -q
-      - name: Samples demo (Python publisher -> C++ listener)
+      - name: Samples demo, file transport (Python publisher -> C++ listener)
         shell: bash
         run: |
           if [ -f .venv/Scripts/activate ]; then source .venv/Scripts/activate; else source .venv/bin/activate; fi
-          samples/run_demo.sh 5
+          samples/run_demo.sh 5 file
+      - name: Samples demo, ipc transport (named pipe / XPC via launchd / Unix socket)
+        shell: bash
+        run: |
+          if [ -f .venv/Scripts/activate ]; then source .venv/Scripts/activate; else source .venv/bin/activate; fi
+          samples/run_demo.sh 5 ipc
       - name: Latency sample
         run: cargo run --release --example latency -p deaddrop -- 1000
 
