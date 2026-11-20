@@ -192,3 +192,21 @@ def test_custom_modes(tmp_path):
 def test_trusted_owner_argument_validation(tmp_path):
     with pytest.raises(ValueError):
         EventConsumer.init(tmp_path, trusted_owner="root-ish")
+
+
+def test_set_log_level(tmp_path, capfd):
+    from deaddrop_ipc import set_log_level
+
+    with pytest.raises(ValueError):
+        set_log_level("loud")
+    set_log_level("debug")
+    try:
+        p = EventProducer.init(tmp_path / "events")
+        p.publish_event(DetectionEvent(1, "A"))
+        p.shutdown()
+    finally:
+        set_log_level("warn")
+    err = capfd.readouterr().err
+    assert "[deaddrop:producer]" in err
+    assert "atomic rename .tmp-" in err
+    assert "now visible to consumers" in err

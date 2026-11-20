@@ -288,6 +288,24 @@ cd crates/deaddrop-py && maturin develop && pytest tests
 cargo run --release --example latency -p deaddrop -- 2000
 ```
 
+## Diagnostic logging
+
+The library logs each step of an exchange through the Rust `log` crate, under two targets, `deaddrop::producer` and `deaddrop::consumer`. At `debug` level that covers: which directory and temp file the producer writes, the flush to disk, the atomic rename and the final file name; and on the consumer side, the watcher backend in use, each OS notification, in-flight temp files it skips, which file it reads, and each event it delivers.
+
+| Where | How to turn it on | Output |
+|---|---|---|
+| Python | `DEADDROP_LOG=debug` in the environment, or `deaddrop_ipc.set_log_level("debug")` | stderr |
+| C / C++ | `DEADDROP_LOG=debug`, or `dd_set_log_level("debug")` / `deaddrop::set_log_level("debug")` | stderr |
+| Rust | `deaddrop::logging::init_from_env()`, or your own logger (`env_logger`, ...) | your logger |
+
+Levels: `off`, `error`, `warn` (default), `info`, `debug`, `trace` (adds data-write and close notifications). Every line starts with `[deaddrop:producer]` or `[deaddrop:consumer]`, then the time, level and process id:
+
+```
+[deaddrop:producer] 16:12:20.799 DEBUG pid=2342 seq=7 atomic rename .tmp-6d2c6f110d4a4efe.part -> evt-00000000000000000007-e596d224d3c7bdad.json
+```
+
+`samples/run_demo.sh` turns this on and colour codes it; see [Behind the scenes](samples/README.md#behind-the-scenes).
+
 ## Measured (Linux container, overlay fs, inotify; 3,000 samples)
 
 | | p50 | p95 | p99 |

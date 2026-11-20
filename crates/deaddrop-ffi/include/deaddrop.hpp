@@ -26,6 +26,10 @@ inline void check(dd_status s) {
     if (s != DD_OK) throw Error(s, dd_last_error());
 }
 
+// "off", "error", "warn" (default), "info", "debug" or "trace". Overrides the
+// DEADDROP_LOG environment variable. Lines go to stderr.
+inline void set_log_level(const std::string &level) { check(dd_set_log_level(level.c_str())); }
+
 // Owned copy of an event, safe to keep after the callback returns.
 struct DetectionEvent {
     std::string schema_version;

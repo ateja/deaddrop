@@ -36,6 +36,7 @@ mod consumer;
 mod error;
 mod event;
 pub mod file;
+pub mod logging;
 mod producer;
 mod transport;
 

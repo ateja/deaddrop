@@ -7,9 +7,11 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use notify::event::{EventKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use super::{naming, security};
+use crate::logging::CONSUMER as LOG;
 use crate::transport::{ConsumerTransport, Dispatcher};
 use crate::{ConsumerConfig, DetectionEvent, Error, Result};
 
@@ -23,6 +25,52 @@ const IDLE_WAIT: Duration = Duration::from_secs(3600);
 enum Signal {
     Wake,
     Stop,
+}
+
+/// Why a directory scan ran, for the logs.
+#[derive(Clone, Copy)]
+enum ScanReason {
+    Startup,
+    Notification,
+    PeriodicRescan,
+}
+
+impl ScanReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScanReason::Startup => "startup scan",
+            ScanReason::Notification => "scan after OS notification",
+            ScanReason::PeriodicRescan => "periodic safety-net rescan",
+        }
+    }
+}
+
+/// Logs one watcher event. Creates, renames and deletes are the interesting
+/// ones (debug); data writes, metadata and access events are trace only.
+fn log_os_event(event: &notify::Event) {
+    let interesting = matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+    );
+    let level = if interesting {
+        log::Level::Debug
+    } else {
+        log::Level::Trace
+    };
+    if !log::log_enabled!(target: LOG, level) {
+        return;
+    }
+    let names: Vec<String> = event
+        .paths
+        .iter()
+        .map(|p| {
+            p.file_name().map_or_else(
+                || p.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    log::log!(target: LOG, level, "OS notification {:?}: {}", event.kind, names.join(" -> "));
 }
 
 struct Running {
@@ -56,19 +104,35 @@ impl ConsumerTransport for FileConsumer {
             return Err(Error::AlreadyWatching);
         }
         security::verify_consumer_dir(&self.config.dir, &self.config.trusted_owner)?;
+        log::debug!(
+            target: LOG,
+            "shared directory {} passed trust checks (owner policy {:?})",
+            self.config.dir.display(),
+            self.config.trusted_owner
+        );
 
         let (tx, rx) = mpsc::channel();
         let wake = tx.clone();
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Err(e) = &res {
-                    log::warn!("deaddrop: watcher reported {e}; rescanning");
+                match &res {
+                    Ok(event) => log_os_event(event),
+                    Err(e) => log::warn!(target: LOG, "watcher reported {e}; rescanning"),
                 }
                 let _ = wake.send(Signal::Wake);
             })?;
         // Register the watch before the initial scan: anything renamed in
         // after this point triggers a wakeup, anything before it is listed.
         watcher.watch(&self.config.dir, RecursiveMode::NonRecursive)?;
+        log::debug!(
+            target: LOG,
+            "watching {} with the OS file watcher ({:?}); safety-net rescan every {}",
+            self.config.dir.display(),
+            <RecommendedWatcher as Watcher>::kind(),
+            self.config
+                .rescan_interval
+                .map_or_else(|| "never".to_owned(), |d| format!("{:.1} s", d.as_secs_f64()))
+        );
 
         let mut scanner = Scanner::new(self.config.clone());
         let interval = self.config.rescan_interval.unwrap_or(IDLE_WAIT);
@@ -91,9 +155,11 @@ impl ConsumerTransport for FileConsumer {
                             if stop {
                                 break;
                             }
-                            scanner.scan(&dispatcher);
+                            scanner.scan(&dispatcher, ScanReason::Notification);
                         }
-                        Err(RecvTimeoutError::Timeout) => scanner.scan(&dispatcher),
+                        Err(RecvTimeoutError::Timeout) => {
+                            scanner.scan(&dispatcher, ScanReason::PeriodicRescan)
+                        }
                     }
                 }
             })?;
@@ -117,6 +183,7 @@ impl ConsumerTransport for FileConsumer {
         };
         drop(watcher); // unregister from the OS first: no new wakeups
         let _ = tx.send(Signal::Stop);
+        log::debug!(target: LOG, "stopping: OS watcher released, joining worker thread");
         if worker.thread().id() == thread::current().id() {
             // Called from inside a listener: the loop exits after this batch.
             return Ok(());
@@ -138,6 +205,8 @@ struct Scanner {
     /// Files already dispatched (or permanently rejected) and still on disk.
     seen: HashSet<OsString>,
     failures: HashMap<OsString, u8>,
+    /// In-flight temp files already reported, so each is logged once.
+    announced_temps: HashSet<OsString>,
 }
 
 impl Scanner {
@@ -146,12 +215,13 @@ impl Scanner {
             config,
             seen: HashSet::new(),
             failures: HashMap::new(),
+            announced_temps: HashSet::new(),
         }
     }
 
     fn initial(&mut self, dispatcher: &Dispatcher) {
         if self.config.replay_existing {
-            self.scan(dispatcher);
+            self.scan(dispatcher, ScanReason::Startup);
         } else if let Ok(entries) = fs::read_dir(&self.config.dir) {
             self.seen.extend(
                 entries
@@ -159,31 +229,48 @@ impl Scanner {
                     .map(|e| e.file_name())
                     .filter(|n| n.to_str().and_then(naming::parse_event_file_name).is_some()),
             );
+            log::debug!(
+                target: LOG,
+                "startup: skipping {} event file(s) already on disk (replay_existing=false)",
+                self.seen.len()
+            );
         }
     }
 
-    fn scan(&mut self, dispatcher: &Dispatcher) {
+    fn scan(&mut self, dispatcher: &Dispatcher, reason: ScanReason) {
         let entries = match fs::read_dir(&self.config.dir) {
             Ok(e) => e,
             Err(e) => {
-                log::warn!("deaddrop: cannot list {}: {e}", self.config.dir.display());
+                log::warn!(target: LOG, "cannot list {}: {e}", self.config.dir.display());
                 return;
             }
         };
 
         let mut present = HashSet::new();
         let mut batch: Vec<(u64, OsString, DetectionEvent)> = Vec::new();
+        let mut in_flight = HashSet::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(seq_id) = name.to_str().and_then(naming::parse_event_file_name) else {
+                if name.to_str().is_some_and(naming::is_temp_file_name) {
+                    in_flight.insert(name);
+                }
                 continue;
             };
             present.insert(name.clone());
             if self.seen.contains(&name) {
                 continue;
             }
+            log::debug!(target: LOG, "{}: reading new event file {}", reason.as_str(), entry.path().display());
             match read_event(&entry.path(), seq_id, self.config.max_event_bytes) {
                 Ok(event) => {
+                    log::debug!(
+                        target: LOG,
+                        "received event seq={} app={:?} from {}",
+                        event.seq_id,
+                        event.app_name,
+                        name.to_string_lossy()
+                    );
                     self.seen.insert(name.clone());
                     self.failures.remove(&name);
                     batch.push((seq_id, name, event));
@@ -192,7 +279,7 @@ impl Scanner {
                     present.remove(&name);
                 }
                 Err(ReadError::Rejected(why)) => {
-                    log::warn!("deaddrop: skipping {}: {why}", entry.path().display());
+                    log::warn!(target: LOG, "skipping {}: {why}", entry.path().display());
                     self.seen.insert(name);
                 }
                 Err(ReadError::Transient(e)) => {
@@ -200,7 +287,8 @@ impl Scanner {
                     *n += 1;
                     if *n >= MAX_READ_ATTEMPTS {
                         log::warn!(
-                            "deaddrop: giving up on {} after {n} attempts: {e}",
+                            target: LOG,
+                            "giving up on {} after {n} attempts: {e}",
                             entry.path().display()
                         );
                         self.failures.remove(&name);
@@ -210,8 +298,29 @@ impl Scanner {
             }
         }
 
+        for tmp in &in_flight {
+            if self.announced_temps.insert(tmp.clone()) {
+                log::debug!(
+                    target: LOG,
+                    "{}: ignoring {} (producer is still writing it; it becomes visible only after the atomic rename)",
+                    reason.as_str(),
+                    tmp.to_string_lossy()
+                );
+            }
+        }
+        self.announced_temps.retain(|n| in_flight.contains(n));
+        if batch.is_empty() && in_flight.is_empty() {
+            log::trace!(target: LOG, "{}: nothing new", reason.as_str());
+        }
+
         batch.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         for (_, _, event) in batch {
+            log::debug!(
+                target: LOG,
+                "delivering seq={} to {} listener(s)",
+                event.seq_id,
+                dispatcher.listener_count()
+            );
             dispatcher.dispatch(event);
         }
         // Forget files the producer pruned so the sets stay bounded.

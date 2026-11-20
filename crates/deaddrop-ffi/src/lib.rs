@@ -153,6 +153,34 @@ pub extern "C" fn dd_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
+// ---------------------------------------------------------------- logging
+
+/// Installs the library's stderr logger once, at the level in DEADDROP_LOG.
+fn ensure_logging() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        deaddrop::logging::init_from_env();
+    });
+}
+
+/// Sets the diagnostic log level: "off", "error", "warn" (default), "info",
+/// "debug" or "trace". Overrides DEADDROP_LOG. Log lines go to stderr and
+/// start with "[deaddrop:producer]" or "[deaddrop:consumer]".
+#[no_mangle]
+pub unsafe extern "C" fn dd_set_log_level(level: *const c_char) -> DdStatus {
+    guard(|| {
+        let raw = str_arg(level, "level")?;
+        let level = deaddrop::logging::parse_level(raw).ok_or_else(|| {
+            bad_arg(&format!(
+                "unknown log level {raw:?}; use off, error, warn, info, debug or trace"
+            ))
+        })?;
+        ensure_logging();
+        deaddrop::logging::init_with_level(level);
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------- producer
 
 #[no_mangle]
@@ -161,6 +189,7 @@ pub unsafe extern "C" fn dd_producer_init(
     out: *mut *mut DdProducer,
 ) -> DdStatus {
     guard(|| {
+        ensure_logging();
         let out = out_ptr(out)?;
         let dir = str_arg(dir, "dir")?;
         let p = EventProducer::with_config(ProducerConfig::new(dir))?;
@@ -255,6 +284,7 @@ pub unsafe extern "C" fn dd_consumer_init_ex(
     out: *mut *mut DdConsumer,
 ) -> DdStatus {
     guard(|| {
+        ensure_logging();
         let out = out_ptr(out)?;
         let mut cfg = ConsumerConfig::new(str_arg(dir, "dir")?);
         cfg.trusted_owner = match trusted_owner {
