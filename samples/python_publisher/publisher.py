@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 
-from deaddrop_ipc import DetectionEvent, EventProducer, IpcError
+from deaddrop_ipc import DetectionEvent, EventProducer, IpcError, set_log_level
 
 DEFAULT_DIR = os.path.join(tempfile.gettempdir(), "deaddrop-demo", "events")
 
@@ -45,6 +45,11 @@ def parse_args():
         help="first seq_id (default: current Unix time in ms, so runs never collide)",
     )
     p.add_argument("--seed", type=int, default=None, help="random seed for repeatable output")
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="print the library's internal steps to stderr (same as DEADDROP_LOG=debug)",
+    )
     return p.parse_args()
 
 
@@ -65,6 +70,8 @@ def make_event(seq_id, rng):
 
 def main():
     args = parse_args()
+    if args.debug:
+        set_log_level("debug")
     rng = random.Random(args.seed)
     start = args.start_seq if args.start_seq is not None else time.time_ns() // 1_000_000
 

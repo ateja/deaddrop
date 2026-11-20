@@ -1,7 +1,7 @@
 // Sample consumer: listens for detection events, prints each one as it
 // arrives, collects them, and prints a summary on exit.
 //
-//   listener [--dir PATH] [--count N] [--timeout SECONDS] [--trust MODE] [--new-only]
+//   listener [--dir PATH] [--count N] [--timeout SECONDS] [--trust MODE] [--new-only] [--debug]
 //
 // Stops after N events (--count), after --timeout seconds, or on Ctrl+C.
 // Exit code: 0 on success, 1 on error, 2 if --count was not reached in time.
@@ -37,19 +37,22 @@ struct Options {
     double timeout_s = 0.0;  // 0 = no timeout
     dd_trusted_owner trust = DD_OWNER_CURRENT_USER;
     bool replay_existing = true;
+    bool debug = false;
 };
 
 [[noreturn]] void usage(const char *argv0, int code) {
     std::fprintf(code ? stderr : stdout,
                  "usage: %s [--dir PATH] [--count N] [--timeout SECONDS]\n"
-                 "          [--trust privileged|current-user|any] [--new-only]\n"
+                 "          [--trust privileged|current-user|any] [--new-only] [--debug]\n"
                  "\n"
                  "  --dir       shared directory (default: <temp>/deaddrop-demo/events)\n"
                  "  --count     stop after N events (default: run until Ctrl+C)\n"
                  "  --timeout   stop after this many seconds\n"
                  "  --trust     who must own the directory (default: current-user;\n"
                  "              production deployments should use privileged)\n"
-                 "  --new-only  ignore events already on disk at startup\n",
+                 "  --new-only  ignore events already on disk at startup\n"
+                 "  --debug     print the library's internal steps to stderr\n"
+                 "              (same as DEADDROP_LOG=debug)\n",
                  argv0);
     std::exit(code);
 }
@@ -76,6 +79,8 @@ Options parse(int argc, char **argv) {
             else usage(argv[0], 1);
         } else if (a == "--new-only") {
             o.replay_existing = false;
+        } else if (a == "--debug") {
+            o.debug = true;
         } else if (a == "-h" || a == "--help") {
             usage(argv[0], 0);
         } else {
@@ -89,6 +94,7 @@ Options parse(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     const Options opt = parse(argc, argv);
+    if (opt.debug) deaddrop::set_log_level("debug");
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 

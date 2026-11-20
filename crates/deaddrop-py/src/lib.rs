@@ -356,9 +356,27 @@ impl Drop for PyEventConsumer {
     }
 }
 
+/// Sets the diagnostic log level: "off", "error", "warn" (default), "info",
+/// "debug" or "trace". Overrides the DEADDROP_LOG environment variable.
+/// Lines go to stderr and start with "[deaddrop:producer]" or
+/// "[deaddrop:consumer]".
+#[pyfunction]
+fn set_log_level(level: &str) -> PyResult<()> {
+    let parsed = core::logging::parse_level(level).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "unknown log level {level:?}; use off, error, warn, info, debug or trace"
+        ))
+    })?;
+    core::logging::init_with_level(parsed);
+    Ok(())
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
+    // Library diagnostics go to stderr at the level in DEADDROP_LOG.
+    core::logging::init_from_env();
+    m.add_function(wrap_pyfunction!(set_log_level, m)?)?;
     m.add_class::<PyDetectionEvent>()?;
     m.add_class::<PyEventProducer>()?;
     m.add_class::<PyEventConsumer>()?;

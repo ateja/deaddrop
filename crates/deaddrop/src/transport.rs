@@ -66,7 +66,10 @@ impl Dispatcher {
                 event.clone().expect("event present")
             };
             if catch_unwind(AssertUnwindSafe(|| listener(ev))).is_err() {
-                log::error!("deaddrop: listener {i} panicked while handling seq_id {seq_id}");
+                log::error!(
+                    target: crate::logging::CONSUMER,
+                    "listener {i} panicked while handling seq_id {seq_id}"
+                );
             }
         }
     }

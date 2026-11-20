@@ -86,6 +86,7 @@ Both default to `<temp>/deaddrop-demo/events`, so no flags are needed. Start the
 | `--interval S` | 0.5 | seconds between events |
 | `--start-seq N` | current Unix time in ms | first `seq_id` (monotonic across runs) |
 | `--seed N` | random | repeatable app choices |
+| `--debug` | off | print the library's internal steps to stderr (same as `DEADDROP_LOG=debug`) |
 
 `listener`
 
@@ -96,7 +97,44 @@ Both default to `<temp>/deaddrop-demo/events`, so no flags are needed. Start the
 | `--timeout S` | none | exit after S seconds |
 | `--trust MODE` | `current-user` | who must own the directory: `privileged`, `current-user`, `any` |
 | `--new-only` | off | ignore events already on disk |
+| `--debug` | off | print the library's internal steps to stderr (same as `DEADDROP_LOG=debug`) |
 
 Listener exit codes: `0` success, `1` error (for example an insecure directory), `2` `--count` not reached before `--timeout`.
 
 `--trust current-user` suits a demo, where you create the folder under your own account. A production consumer should keep the library default, `privileged`, so only a root/SYSTEM-owned directory is trusted.
+
+## Behind the scenes
+
+`run_demo.sh` runs both programs with `DEADDROP_LOG=debug`, so the library reports every step it takes. Those lines are indented and coloured, separate from what the programs print themselves:
+
+- **yellow** `| [deaddrop:producer] ...`: inside the Python publisher
+- **cyan** `| [deaddrop:consumer] ...`: inside the C++ listener
+
+One event, start to finish (abridged):
+
+```
+      | [deaddrop:producer] DEBUG seq=…596 writing 217 bytes to temp file /tmp/deaddrop-demo-2336/events/.tmp-6d2c6f110d4a4efe.part (hidden from consumers until renamed)
+      | [deaddrop:consumer] DEBUG OS notification Create(File): .tmp-6d2c6f110d4a4efe.part
+      | [deaddrop:consumer] DEBUG scan after OS notification: ignoring .tmp-6d2c6f110d4a4efe.part (producer is still writing it; it becomes visible only after the atomic rename)
+      | [deaddrop:producer] DEBUG seq=…596 temp file complete and flushed to disk (fsync) in 1.01 ms
+      | [deaddrop:producer] DEBUG seq=…596 atomic rename .tmp-6d2c6f110d4a4efe.part -> evt-00000001795191140596-e596d224d3c7bdad.json
+      | [deaddrop:consumer] DEBUG OS notification Modify(Name(Both)): .tmp-6d2c6f110d4a4efe.part -> evt-00000001795191140596-e596d224d3c7bdad.json
+      | [deaddrop:consumer] DEBUG scan after OS notification: reading new event file /tmp/deaddrop-demo-2336/events/evt-00000001795191140596-e596d224d3c7bdad.json
+      | [deaddrop:consumer] DEBUG received event seq=…596 app="Adatum Reports" from evt-00000001795191140596-e596d224d3c7bdad.json
+      | [deaddrop:consumer] DEBUG delivering seq=…596 to 1 listener(s)
+[listener] recv #2 seq=…596 app='Adatum Reports' ...
+      | [deaddrop:producer] DEBUG seq=…596 rename done in 0.04 ms: event is now visible to consumers as /tmp/deaddrop-demo-2336/events/evt-00000001795191140596-e596d224d3c7bdad.json (publish took 1.40 ms)
+[publisher] sent seq=…596 app='Adatum Reports' ...
+```
+
+Real lines also carry a timestamp and process id, for example `[deaddrop:consumer] 16:12:20.799 DEBUG pid=2341 ...`. The consumer often reads the file before the producer logs "rename done": the rename is instant, and the producer is still flushing the directory entry to disk.
+
+To control it:
+
+| You want | Run |
+|---|---|
+| Programs' output only | `DEADDROP_LOG=off samples/run_demo.sh` |
+| Every OS notification, including data writes and closes | `DEADDROP_LOG=trace samples/run_demo.sh` |
+| No colours (automatic when output is piped) | `NO_COLOR=1 samples/run_demo.sh` |
+| Internals while running the programs by hand | add `--debug` to either program, or `export DEADDROP_LOG=debug` |
+| Only the library lines from a manual run | `samples/cpp_listener/build/listener --debug 2>&1 \| grep '\[deaddrop:'` |

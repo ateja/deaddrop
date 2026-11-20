@@ -3,9 +3,10 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::{atomic, naming, security};
+use crate::logging::PRODUCER as LOG;
 use crate::transport::ProducerTransport;
 use crate::{DetectionEvent, Error, ProducerConfig, Result};
 
@@ -28,7 +29,16 @@ pub struct FileProducer {
 impl FileProducer {
     pub fn new(config: ProducerConfig) -> Result<Self> {
         config.check()?;
+        let existed = config.dir.exists();
         security::prepare_producer_dir(&config)?;
+        log::debug!(
+            target: LOG,
+            "shared directory {} ({}; durable={}, max_files={:?})",
+            config.dir.display(),
+            if existed { "already existed, ownership and permissions verified" } else { "created with restrictive permissions" },
+            config.durable,
+            config.max_files,
+        );
         let producer = Self {
             config,
             prune_lock: Mutex::new(()),
@@ -73,8 +83,8 @@ impl FileProducer {
                 .ok()
                 .and_then(|t| now.duration_since(t).ok())
                 .is_some_and(|age| age >= STALE_TEMP_AGE);
-            if stale {
-                let _ = fs::remove_file(entry.path());
+            if stale && fs::remove_file(entry.path()).is_ok() {
+                log::debug!(target: LOG, "removed stale temp file {} left by an earlier crash", entry.path().display());
             }
         }
     }
@@ -89,7 +99,7 @@ impl FileProducer {
         let entries = match fs::read_dir(&self.config.dir) {
             Ok(e) => e,
             Err(e) => {
-                log::warn!("deaddrop: retention scan failed: {e}");
+                log::warn!(target: LOG, "retention scan failed: {e}");
                 return;
             }
         };
@@ -115,12 +125,20 @@ impl FileProducer {
             .config
             .max_files
             .map_or(0, |max| files.len().saturating_sub(max));
+        let mut removed = 0usize;
         for (_, _, path) in files.iter().take(expired.max(excess)) {
-            if let Err(e) = fs::remove_file(path) {
-                if e.kind() != io::ErrorKind::NotFound {
-                    log::warn!("deaddrop: could not prune {}: {e}", path.display());
-                }
+            match fs::remove_file(path) {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!(target: LOG, "could not prune {}: {e}", path.display()),
             }
+        }
+        if removed > 0 {
+            log::debug!(
+                target: LOG,
+                "retention: removed {removed} old event file(s), {} kept",
+                files.len() - removed
+            );
         }
     }
 }
@@ -136,10 +154,18 @@ impl ProducerTransport for FileProducer {
         }
 
         let dir = &self.config.dir;
+        let seq = event.seq_id;
+        let started = Instant::now();
         // Temp file lives in the target directory so the rename never
         // crosses a volume boundary (which would not be atomic).
         let tmp = loop {
             let candidate = dir.join(naming::temp_file_name(naming::nonce()));
+            log::debug!(
+                target: LOG,
+                "seq={seq} writing {} bytes to temp file {} (hidden from consumers until renamed)",
+                bytes.len(),
+                candidate.display()
+            );
             match atomic::write_new_file(
                 &candidate,
                 &bytes,
@@ -147,7 +173,15 @@ impl ProducerTransport for FileProducer {
                 self.unix_mode(),
                 self.unix_group(),
             ) {
-                Ok(()) => break candidate,
+                Ok(()) => {
+                    log::debug!(
+                        target: LOG,
+                        "seq={seq} temp file complete{} in {:.2} ms",
+                        if self.config.durable { " and flushed to disk (fsync)" } else { "" },
+                        ms(started)
+                    );
+                    break candidate;
+                }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
                     let _ = fs::remove_file(&candidate);
@@ -158,19 +192,36 @@ impl ProducerTransport for FileProducer {
 
         let mut last_err = None;
         for _ in 0..RENAME_ATTEMPTS {
-            let target = dir.join(naming::event_file_name(event.seq_id, naming::nonce()));
+            let target = dir.join(naming::event_file_name(seq, naming::nonce()));
+            log::debug!(
+                target: LOG,
+                "seq={seq} atomic rename {} -> {}",
+                file_name(&tmp),
+                file_name(&target)
+            );
+            let renaming = Instant::now();
             match atomic::rename_no_replace(&tmp, &target) {
                 Ok(()) => {
+                    let rename_ms = ms(renaming);
                     if self.config.durable {
                         atomic::sync_dir(dir)?;
                     }
+                    log::debug!(
+                        target: LOG,
+                        "seq={seq} rename done in {rename_ms:.2} ms: event is now visible to consumers as {} (publish took {:.2} ms)",
+                        target.display(),
+                        ms(started)
+                    );
                     if self.since_prune.fetch_add(1, Ordering::Relaxed) + 1 >= PRUNE_EVERY {
                         self.since_prune.store(0, Ordering::Relaxed);
                         self.prune();
                     }
                     return Ok(());
                 }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last_err = Some(e),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    log::debug!(target: LOG, "seq={seq} {} already exists; retrying with a new name", file_name(&target));
+                    last_err = Some(e);
+                }
                 Err(e) => {
                     last_err = Some(e);
                     break;
@@ -189,4 +240,14 @@ impl ProducerTransport for FileProducer {
         self.prune();
         Ok(())
     }
+}
+
+fn ms(since: Instant) -> f64 {
+    since.elapsed().as_secs_f64() * 1e3
+}
+
+fn file_name(path: &std::path::Path) -> std::borrow::Cow<'_, str> {
+    path.file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_else(|| path.to_string_lossy())
 }

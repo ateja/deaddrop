@@ -17,6 +17,7 @@ from ._native import (
     IpcError,
     ShutDownError,
     __version__,
+    set_log_level,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "IpcError",
     "ShutDownError",
     "__version__",
+    "set_log_level",
 ]

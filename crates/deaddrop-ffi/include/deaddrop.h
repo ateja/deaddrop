@@ -64,6 +64,12 @@ typedef void (*dd_event_callback)(const dd_event_view *event, void *user_data);
 const char *dd_version(void);
 const char *dd_last_error(void);
 
+/* Diagnostic logging to stderr. Level: "off", "error", "warn" (default),
+ * "info", "debug" or "trace". The DEADDROP_LOG environment variable sets the
+ * initial level; this call overrides it. Lines start with
+ * "[deaddrop:producer]" or "[deaddrop:consumer]". */
+dd_status dd_set_log_level(const char *level);
+
 /* Producer ------------------------------------------------------------ */
 
 dd_status dd_producer_init(const char *dir, dd_producer **out);
