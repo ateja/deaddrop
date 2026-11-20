@@ -9,21 +9,17 @@ Two small programs that talk only through deaddrop:
 
 Neither program knows about the other. They only agree on the directory.
 
-## One command
+## Setup
 
-From the repository root, inside a Python virtualenv:
-
-```bash
-pip install "maturin>=1.7,<2"
-```
+Follow [Run the samples](../README.md#run-the-samples-from-a-fresh-clone) in the main README: install the prerequisites, clone, create the virtual environment, build, run. Short version once everything is installed, from the repository root with the venv active:
 
 ```bash
 samples/run_demo.sh 5
 ```
 
-This builds the C library, the C++ listener and the Python bindings, then runs both programs. On Windows run it from Git Bash.
+## Expected output
 
-Expected output (abridged):
+Abridged, from `samples/run_demo.sh 5`:
 
 ```
 [listener] waiting for /tmp/deaddrop-demo-1234/events to be created by the publisher...
@@ -43,37 +39,17 @@ Expected output (abridged):
 
 The listener often prints `recv` before the publisher prints `sent`: delivery finishes before Python gets back to its `print`.
 
-## Step by step (two terminals)
-
-Build once:
-
-```bash
-cargo build --release -p deaddrop-ffi
-```
-
-```bash
-cmake -S samples/cpp_listener -B samples/cpp_listener/build && cmake --build samples/cpp_listener/build --config Release
-```
-
-```bash
-cd crates/deaddrop-py && maturin develop --release && cd ../..
-```
-
-Terminal A, listener (runs until Ctrl+C):
+## Two terminals
 
 ```bash
 samples/cpp_listener/build/listener
 ```
 
-On Windows the binary is `samples\cpp_listener\build\Release\listener.exe`.
-
-Terminal B, publisher:
-
 ```bash
 python samples/python_publisher/publisher.py --count 10 --interval 0.5
 ```
 
-Both default to `<temp>/deaddrop-demo/events`, so no flags are needed. Start them in either order: the listener waits for the directory, and by default it also delivers events already on disk.
+Run the first in one terminal and the second in another (with the venv active). On Windows the listener is `samples\cpp_listener\build\Release\listener.exe`. Both default to `<temp>/deaddrop-demo/events`, so no flags are needed, and they can start in either order: the listener waits for the folder and by default also delivers events already on disk.
 
 ## Options
 

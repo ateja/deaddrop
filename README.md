@@ -12,22 +12,148 @@ crates/
     include/deaddrop.hpp   header only C++17 RAII wrapper
     examples/consumer.cpp      C++ consumer agent
 samples/
-  python_publisher/    Python program that publishes detections
+  python_publisher/    Python program that publishes events
   cpp_listener/        C++ program (CMake) that listens and collects
   run_demo.sh          builds both and runs them together
-  deaddrop-py/     Python wheel via PyO3 + maturin (pip install deaddrop-ipc)
+  deaddrop-py/     Python package deaddrop-ipc via PyO3 + maturin
 .github/workflows/ci.yml       tests on macOS, Windows, Linux; builds wheels
 ```
 
-## Try it
+## Run the samples (from a fresh clone)
 
-`samples/` has a Python publisher and a C++ listener that talk through deaddrop. Inside a Python virtualenv with maturin installed:
+`samples/` has a Python publisher and a C++ listener that talk only through deaddrop. These steps take you from nothing to both programs running. The Python side lives in a virtual environment (venv) inside the repo, so nothing is installed system wide.
+
+### 1. Install the prerequisites (once per machine)
+
+| Tool | Version | macOS | Windows | Linux (Debian/Ubuntu) |
+|---|---|---|---|---|
+| Git | any | `xcode-select --install` | https://git-scm.com (includes Git Bash) | `sudo apt install git` |
+| Rust | 1.91+ | https://rustup.rs | https://rustup.rs | https://rustup.rs |
+| Python | 3.9+ | https://python.org or `brew install python` | https://python.org (tick **Add python.exe to PATH**) | `sudo apt install python3 python3-venv` |
+| CMake | 3.18+ | `brew install cmake` | https://cmake.org/download | `sudo apt install cmake` |
+| C++17 compiler | | `xcode-select --install` | Visual Studio Build Tools, workload **Desktop development with C++** | `sudo apt install build-essential` |
+
+Check Rust with `rustc --version`. If it is older than 1.91, run `rustup update stable`.
+
+### 2. Clone the repository
+
+```bash
+git clone https://github.com/ateja/deaddrop.git
+```
+
+```bash
+cd deaddrop
+```
+
+### 3. Create a virtual environment and install the Python bindings into it
+
+macOS / Linux:
+
+```bash
+python3 -m venv .venv
+```
+
+```bash
+source .venv/bin/activate
+```
+
+```bash
+python -m pip install --upgrade pip
+```
+
+```bash
+pip install ./crates/deaddrop-py
+```
+
+Windows (PowerShell):
+
+```powershell
+py -m venv .venv
+```
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+```powershell
+python -m pip install --upgrade pip
+```
+
+```powershell
+pip install ./crates/deaddrop-py
+```
+
+`pip install ./crates/deaddrop-py` compiles the Rust core and installs the `deaddrop_ipc` package into `.venv` (about 30 seconds the first time). Your prompt now starts with `(.venv)`. Activate the venv again in every new terminal where you run Python (step 3's second command), and run `deactivate` to leave it. `.venv/` is git-ignored.
+
+Check it worked:
+
+```bash
+python -c "import deaddrop_ipc; print(deaddrop_ipc.__version__)"
+```
+
+### 4. Build the C library and the C++ listener
+
+The same commands work on every OS:
+
+```bash
+cargo build --release -p deaddrop-ffi
+```
+
+```bash
+cmake -S samples/cpp_listener -B samples/cpp_listener/build -DCMAKE_BUILD_TYPE=Release
+```
+
+```bash
+cmake --build samples/cpp_listener/build --config Release
+```
+
+The listener ends up at `samples/cpp_listener/build/listener` (macOS/Linux) or `samples\cpp_listener\build\Release\listener.exe` (Windows).
+
+### 5. Run them
+
+Open two terminals in the `deaddrop` folder.
+
+**Terminal A, the C++ listener** (runs until Ctrl+C; add `--count 10` to stop after 10 events):
+
+```bash
+samples/cpp_listener/build/listener
+```
+
+On Windows:
+
+```powershell
+samples\cpp_listener\build\Release\listener.exe
+```
+
+**Terminal B, the Python publisher** (activate the venv first, as in step 3):
+
+```bash
+python samples/python_publisher/publisher.py --count 10 --interval 0.5
+```
+
+Each `sent` line in terminal B shows up as a `recv` line in terminal A. When the listener stops, it prints a summary. Both programs default to the same folder, `<temp>/deaddrop-demo/events`, so no flags are needed, and they can start in either order.
+
+**Or both in one command** (macOS/Linux, or Git Bash on Windows, with the venv active):
 
 ```bash
 samples/run_demo.sh 5
 ```
 
-See [samples/README.md](samples/README.md) for the two terminal walkthrough.
+It rebuilds anything missing, runs both programs against a fresh folder, and ends with `==> demo OK: listener received all 5 events`.
+
+[samples/README.md](samples/README.md) shows sample output and every command line option.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `rustc 1.xx is not supported by the following packages` | Rust is older than 1.91: `rustup update stable` |
+| `ModuleNotFoundError: No module named 'deaddrop_ipc'` | The venv is not active in this terminal (step 3, second command), or `pip install ./crates/deaddrop-py` was skipped |
+| Windows: `running scripts is disabled on this system` when activating | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then activate again |
+| Windows: CMake `No CMAKE_CXX_COMPILER could be found` | Install Visual Studio Build Tools with **Desktop development with C++**, then open a new terminal |
+| `libdeaddrop not found` / `Missing ...deaddrop.dll.lib` from CMake | Run `cargo build --release -p deaddrop-ffi` first (step 4) |
+| Listener: `deaddrop error 4: insecure IPC directory ... lets group or others write` | Another tool loosened the folder's permissions. Delete `<temp>/deaddrop-demo` and let the publisher recreate it |
+| Listener stays on `waiting for ... to be created` | The publisher is using a different folder. Pass the same `--dir PATH` to both |
 
 ## How it works
 
@@ -73,7 +199,7 @@ Not guaranteed: delivery of events the producer pruned before a consumer read th
 ## Integration: producer team (Python)
 
 ```bash
-pip install deaddrop-ipc            # wheel built from crates/deaddrop-py
+pip install ./crates/deaddrop-py     # from a clone, inside a venv; not on PyPI yet
 ```
 
 ```python

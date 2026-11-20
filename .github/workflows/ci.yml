@@ -40,6 +40,60 @@ jobs:
       - name: Latency sample
         run: cargo run --release --example latency -p deaddrop -- 1000
 
+  # Follows "Run the samples (from a fresh clone)" in README.md command for
+  # command, so the documented steps stay correct on every OS.
+  readme-quickstart:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Steps 3-5 (macOS / Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install ./crates/deaddrop-py
+          python -c "import deaddrop_ipc; print(deaddrop_ipc.__version__)"
+          cargo build --release -p deaddrop-ffi
+          cmake -S samples/cpp_listener -B samples/cpp_listener/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build samples/cpp_listener/build --config Release
+          samples/cpp_listener/build/listener --count 3 --timeout 60 &
+          LISTENER=$!
+          sleep 1
+          python samples/python_publisher/publisher.py --count 3 --interval 0.2
+          wait $LISTENER
+      - name: Steps 3-5 (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          py -m venv .venv
+          .venv\Scripts\Activate.ps1
+          python -m pip install --upgrade pip
+          pip install ./crates/deaddrop-py
+          python -c "import deaddrop_ipc; print(deaddrop_ipc.__version__)"
+          cargo build --release -p deaddrop-ffi
+          cmake -S samples/cpp_listener -B samples/cpp_listener/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build samples/cpp_listener/build --config Release
+          $listener = Start-Process -FilePath samples\cpp_listener\build\Release\listener.exe `
+            -ArgumentList '--count', '3', '--timeout', '60' -NoNewWindow -PassThru
+          $null = $listener.Handle   # keep a handle so ExitCode is available
+          Start-Sleep -Seconds 1
+          python samples/python_publisher/publisher.py --count 3 --interval 0.2
+          $listener.WaitForExit()
+          if ($listener.ExitCode -ne 0) { throw "listener exited with $($listener.ExitCode)" }
+
   wheels:
     needs: test
     strategy:
