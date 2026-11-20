@@ -240,6 +240,10 @@ impl ProducerTransport for FileProducer {
         self.prune();
         Ok(())
     }
+
+    fn describe(&self) -> String {
+        format!("file: {}", self.config.dir.display())
+    }
 }
 
 fn ms(since: Instant) -> f64 {

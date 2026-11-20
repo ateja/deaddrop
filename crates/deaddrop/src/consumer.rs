@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::{self, Resolved};
 use crate::file::FileConsumer;
+use crate::ipc::IpcConsumer;
+use crate::logging::CONSUMER;
 use crate::transport::{ConsumerTransport, Dispatcher};
 use crate::{DetectionEvent, Error, Result, DEFAULT_MAX_EVENT_BYTES};
 
@@ -59,10 +62,45 @@ pub struct EventConsumer {
 }
 
 impl EventConsumer {
-    /// Targets `dir` with default settings (directory must be owned by a
+    /// Targets `target` with default settings (the producer must run as a
     /// privileged account).
-    pub fn init(dir: impl AsRef<Path>) -> Result<Self> {
-        Self::with_config(ConsumerConfig::new(dir.as_ref()))
+    ///
+    /// `target` is normally the shared directory (file transport). If it is a
+    /// `.yaml` file, or `DEADDROP_CONFIG` names one, that configuration picks
+    /// the transport at runtime: see [`crate::config`].
+    pub fn init(target: impl AsRef<Path>) -> Result<Self> {
+        Self::init_with(target, |_| {})
+    }
+
+    /// Like [`Self::init`], and `tune` can adjust the settings. With IPC,
+    /// `trusted_owner` is the policy for the producer process connecting
+    /// (unless the YAML sets `ipc.trusted_peer`) and `max_event_bytes`
+    /// still applies; the directory options are unused.
+    pub fn init_with(
+        target: impl AsRef<Path>,
+        tune: impl FnOnce(&mut ConsumerConfig),
+    ) -> Result<Self> {
+        let resolved = config::resolve(target.as_ref(), CONSUMER)?;
+        let dir = match &resolved {
+            Resolved::File(dir) => dir.clone(),
+            Resolved::Ipc(_) => PathBuf::new(),
+        };
+        let mut cfg = ConsumerConfig::new(dir);
+        tune(&mut cfg);
+        match resolved {
+            Resolved::File(_) => Self::with_config(cfg),
+            Resolved::Ipc(settings) => {
+                if cfg.max_event_bytes == 0 {
+                    return Err(Error::InvalidConfig("max_event_bytes must be > 0".into()));
+                }
+                let policy = settings.trusted_peer.clone().unwrap_or(cfg.trusted_owner);
+                Ok(Self::with_transport(Box::new(IpcConsumer::new(
+                    &settings,
+                    policy,
+                    cfg.max_event_bytes,
+                ))))
+            }
+        }
     }
 
     pub fn with_config(config: ConsumerConfig) -> Result<Self> {
@@ -115,6 +153,12 @@ impl EventConsumer {
 
     pub fn is_watching(&self) -> bool {
         self.watching
+    }
+
+    /// Which transport and endpoint this consumer uses, e.g.
+    /// `file: /var/run/vendor_ipc/events` or `ipc: XPC service com.example`.
+    pub fn endpoint(&self) -> String {
+        self.transport.describe()
     }
 
     /// Stops the watcher and joins the worker thread. Safe to call more than

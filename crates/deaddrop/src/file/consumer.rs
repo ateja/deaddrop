@@ -135,11 +135,18 @@ impl ConsumerTransport for FileConsumer {
         );
 
         let mut scanner = Scanner::new(self.config.clone());
+        // Take the "already on disk" snapshot before returning, so an event
+        // published right after start_watching() is never mistaken for old.
+        if !self.config.replay_existing {
+            scanner.mark_existing_as_seen();
+        }
         let interval = self.config.rescan_interval.unwrap_or(IDLE_WAIT);
         let worker = thread::Builder::new()
             .name("deaddrop-consumer".into())
             .spawn(move || {
-                scanner.initial(&dispatcher);
+                if scanner.config.replay_existing {
+                    scanner.scan(&dispatcher, ScanReason::Startup);
+                }
                 loop {
                     match rx.recv_timeout(interval) {
                         Ok(Signal::Stop) | Err(RecvTimeoutError::Disconnected) => break,
@@ -192,6 +199,10 @@ impl ConsumerTransport for FileConsumer {
             .join()
             .map_err(|_| Error::Watcher("consumer worker thread panicked".into()))
     }
+
+    fn describe(&self) -> String {
+        format!("file: {}", self.config.dir.display())
+    }
 }
 
 impl Drop for FileConsumer {
@@ -219,22 +230,21 @@ impl Scanner {
         }
     }
 
-    fn initial(&mut self, dispatcher: &Dispatcher) {
-        if self.config.replay_existing {
-            self.scan(dispatcher, ScanReason::Startup);
-        } else if let Ok(entries) = fs::read_dir(&self.config.dir) {
+    /// Marks every event file currently on disk as seen (replay_existing=false).
+    fn mark_existing_as_seen(&mut self) {
+        if let Ok(entries) = fs::read_dir(&self.config.dir) {
             self.seen.extend(
                 entries
                     .flatten()
                     .map(|e| e.file_name())
                     .filter(|n| n.to_str().and_then(naming::parse_event_file_name).is_some()),
             );
-            log::debug!(
-                target: LOG,
-                "startup: skipping {} event file(s) already on disk (replay_existing=false)",
-                self.seen.len()
-            );
         }
+        log::debug!(
+            target: LOG,
+            "startup: skipping {} event file(s) already on disk (replay_existing=false)",
+            self.seen.len()
+        );
     }
 
     fn scan(&mut self, dispatcher: &Dispatcher, reason: ScanReason) {
