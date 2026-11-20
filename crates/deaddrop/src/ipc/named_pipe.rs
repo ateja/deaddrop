@@ -8,14 +8,13 @@
 //! On top of that, each side checks the account of the process on the other
 //! end before an event crosses.
 
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -248,8 +247,6 @@ struct PipeServer {
     path: String,
     stop: Arc<AtomicBool>,
     acceptor: Option<JoinHandle<()>>,
-    /// Pipe instances a reader is currently using, so stop() can disconnect them.
-    active: Arc<Mutex<HashMap<u64, HandleValue>>>,
     readers: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -343,18 +340,15 @@ pub(super) fn serve(
         })?;
 
     let stop = Arc::new(AtomicBool::new(false));
-    let active: Arc<Mutex<HashMap<u64, HandleValue>>> = Arc::default();
     let readers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::default();
     let acceptor = {
-        let (stop, active, readers) =
-            (Arc::clone(&stop), Arc::clone(&active), Arc::clone(&readers));
+        let (stop, readers) = (Arc::clone(&stop), Arc::clone(&readers));
         let first = first as HandleValue;
         let path = path.clone();
         thread::Builder::new()
             .name("deaddrop-ipc-accept".into())
             .spawn(move || {
                 let security = security; // keep the descriptor alive
-                let next_id = AtomicU64::new(0);
                 let mut pending = first as HANDLE;
                 loop {
                     // stop() may have run while no instance existed for its
@@ -371,7 +365,7 @@ pub(super) fn serve(
                         break;
                     }
                     if ok {
-                        accept(pending, &path, &policy, max_bytes, &sink, &active, &readers, &next_id);
+                        accept(pending, &path, &policy, max_bytes, &sink, &readers);
                     } else {
                         log::warn!(target: CONSUMER, "ConnectNamedPipe failed: {}", io::Error::last_os_error());
                         unsafe { CloseHandle(pending) };
@@ -396,21 +390,17 @@ pub(super) fn serve(
         path,
         stop,
         acceptor: Some(acceptor),
-        active,
         readers,
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn accept(
     pipe: HANDLE,
     path: &str,
     policy: &TrustedOwner,
     max_bytes: usize,
     sink: &Sink,
-    active: &Arc<Mutex<HashMap<u64, HandleValue>>>,
     readers: &Arc<Mutex<Vec<JoinHandle<()>>>>,
-    next_id: &AtomicU64,
 ) {
     let mut pid = 0u32;
     // SAFETY: connected pipe instance.
@@ -436,12 +426,7 @@ fn accept(
         }
     }
     log::debug!(target: CONSUMER, "accepted connection on {path} from {peer}");
-    let id = next_id.fetch_add(1, Ordering::Relaxed);
-    active
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(id, pipe as HandleValue);
-    let (sink, active2) = (sink.clone(), Arc::clone(active));
+    let sink = sink.clone();
     let handle = pipe as HandleValue;
     let reader = thread::Builder::new()
         .name("deaddrop-ipc-reader".into())
@@ -449,18 +434,12 @@ fn accept(
             // SAFETY: we own this pipe instance from here on.
             let file = unsafe { File::from_raw_handle(handle as RawHandle) };
             read_frames(&file, &peer, max_bytes, &sink);
-            // Unregister before the handle is closed, under the lock stop() uses.
-            active2
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .remove(&id);
-            drop(file);
+            drop(file); // closes this pipe instance
         });
     match reader {
         Ok(h) => readers.lock().unwrap_or_else(|p| p.into_inner()).push(h),
         Err(e) => {
             log::warn!(target: CONSUMER, "cannot start reader thread: {e}");
-            active.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
             unsafe { CloseHandle(pipe) };
         }
     }
@@ -475,25 +454,36 @@ impl Server for PipeServer {
         // Wake the blocking ConnectNamedPipe with a throwaway client.
         let _ = OpenOptions::new().write(true).open(&self.path);
         let _ = acceptor.join();
-        let readers: Vec<_> = self
+
+        // Readers block in ReadFile on synchronous handles. Windows serializes
+        // I/O per synchronous handle, so DisconnectNamedPipe or CloseHandle
+        // from here would wait behind that read forever. CancelSynchronousIo
+        // aborts the read instead; repeat it, since a reader may be between
+        // two reads when one cancel lands.
+        let mut readers: Vec<_> = self
             .readers
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .drain(..)
             .collect();
-        {
-            let active = self.active.lock().unwrap_or_else(|p| p.into_inner());
-            for &h in active.values() {
-                // Forces a pending ReadFile on that instance to fail.
-                unsafe { DisconnectNamedPipe(h as HANDLE) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !readers.is_empty() && std::time::Instant::now() < deadline {
+            for r in &readers {
+                if !r.is_finished() {
+                    // SAFETY: the JoinHandle keeps the thread handle valid.
+                    unsafe { CancelSynchronousIo(r.as_raw_handle() as HANDLE) };
+                }
             }
+            thread::sleep(std::time::Duration::from_millis(5));
+            let (done, pending): (Vec<_>, Vec<_>) =
+                readers.into_iter().partition(|r| r.is_finished());
+            for r in done {
+                let _ = r.join();
+            }
+            readers = pending;
         }
-        for r in &readers {
-            // Belt and braces for a reader blocked in synchronous I/O.
-            unsafe { CancelSynchronousIo(r.as_raw_handle() as HANDLE) };
-        }
-        for r in readers {
-            let _ = r.join();
+        if !readers.is_empty() {
+            log::warn!(target: CONSUMER, "{} reader thread(s) on {} did not stop in time; detaching", readers.len(), self.path);
         }
     }
 }

@@ -56,6 +56,8 @@ public:
     }
     void publish_json(const std::string &json) { check(dd_producer_publish_json(p_, json.data(), json.size())); }
     void shutdown() { check(dd_producer_shutdown(p_)); }
+    // e.g. "file: /path" or "ipc: named pipe \\.\pipe\name"
+    std::string endpoint() const { return dd_producer_endpoint(p_); }
 
 private:
     dd_producer *p_ = nullptr;
@@ -85,6 +87,8 @@ public:
         check(dd_consumer_register_listener(c_, &Consumer::trampoline, listeners_.back().get()));
     }
     void start_watching() { check(dd_consumer_start(c_)); }
+    // e.g. "file: /path" or "ipc: XPC service com.example"
+    std::string endpoint() const { return dd_consumer_endpoint(c_); }
     void shutdown() { check(dd_consumer_shutdown(c_)); }
 
 private:

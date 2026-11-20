@@ -55,6 +55,10 @@ fn start_consumer_with(
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "an XPC listener must run under launchd; CI covers XPC via samples/run_demo.sh"
+)]
 fn roundtrip_in_order() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = trusted_config(tmp.path());
@@ -89,6 +93,10 @@ fn roundtrip_in_order() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "an XPC listener must run under launchd; CI covers XPC via samples/run_demo.sh"
+)]
 fn producer_first_events_are_held_until_consumer_starts() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = trusted_config(tmp.path());
@@ -107,6 +115,10 @@ fn producer_first_events_are_held_until_consumer_starts() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "an XPC listener must run under launchd; CI covers XPC via samples/run_demo.sh"
+)]
 fn producer_reconnects_after_consumer_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = trusted_config(tmp.path());
@@ -133,6 +145,10 @@ fn producer_reconnects_after_consumer_restart() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "an XPC listener must run under launchd; CI covers XPC via samples/run_demo.sh"
+)]
 fn shutdown_flushes_queued_events() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = trusted_config(tmp.path());
@@ -154,6 +170,10 @@ fn shutdown_flushes_queued_events() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "an XPC listener must run under launchd; CI covers XPC via samples/run_demo.sh"
+)]
 fn second_consumer_on_same_endpoint_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = trusted_config(tmp.path());
@@ -165,6 +185,10 @@ fn second_consumer_on_same_endpoint_is_refused() {
 
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "an XPC listener must run under launchd; CI covers XPC via samples/run_demo.sh"
+)]
 fn consumer_rejects_untrusted_producer() {
     let tmp = tempfile::tempdir().unwrap();
     // No trusted_peer in YAML: the consumer's own policy applies.
@@ -186,4 +210,24 @@ fn unsafe_euid() -> u32 {
     }
     // SAFETY: trivial libc call.
     unsafe { geteuid() }
+}
+
+/// Without launchd, macOS refuses an XPC listener; the error must say why,
+/// and a producer must keep its events queued rather than fail.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_listener_outside_launchd_explains_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = trusted_config(tmp.path());
+    let mut c = EventConsumer::init(&cfg).unwrap();
+    c.register_event_listener(|_| {}).unwrap();
+    let err = c.start_watching().unwrap_err().to_string();
+    assert!(
+        err.contains("launchd") && err.contains("MachServices"),
+        "{err}"
+    );
+
+    let p = EventProducer::init(&cfg).unwrap();
+    assert!(p.endpoint().contains("XPC service"), "{}", p.endpoint());
+    p.publish_event(&DetectionEvent::new(1, "A")).unwrap(); // queued, not an error
 }

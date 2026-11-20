@@ -169,7 +169,8 @@ impl PyEventProducer {
         file_mode: Option<u32>,
         group: Option<u32>,
     ) -> PyResult<Self> {
-        let mut cfg = core::ProducerConfig::new(path);
+        // File transport settings; used only if the config selects "file".
+        let mut cfg = core::ProducerConfig::new(PathBuf::new());
         cfg.durable = durable;
         cfg.max_files = max_files;
         cfg.max_age = match max_age_seconds {
@@ -190,7 +191,13 @@ impl PyEventProducer {
             cfg.group = group;
         }
         let inner = py
-            .allow_threads(|| core::EventProducer::with_config(cfg))
+            .allow_threads(|| {
+                core::EventProducer::init_with(&path, move |c| {
+                    let dir = std::mem::take(&mut c.dir);
+                    *c = cfg;
+                    c.dir = dir;
+                })
+            })
             .map_err(err)?;
         Ok(Self { inner })
     }
@@ -212,6 +219,12 @@ impl PyEventProducer {
         self.inner.is_shut_down()
     }
 
+    /// Transport in use, e.g. "file: /path" or "ipc: named pipe \\.\pipe\name".
+    #[getter]
+    fn endpoint(&self) -> String {
+        self.inner.endpoint()
+    }
+
     fn __enter__(slf: Py<Self>) -> Py<Self> {
         slf
     }
@@ -228,6 +241,7 @@ impl PyEventProducer {
 struct PyEventConsumer {
     // None once shut down. The lock is never held while joining the worker.
     inner: Mutex<Option<core::EventConsumer>>,
+    endpoint: String,
 }
 
 impl PyEventConsumer {
@@ -260,7 +274,7 @@ impl PyEventConsumer {
         rescan_interval_seconds: Option<f64>,
         max_event_bytes: usize,
     ) -> PyResult<Self> {
-        let mut cfg = core::ConsumerConfig::new(path);
+        let mut cfg = core::ConsumerConfig::new(PathBuf::new());
         cfg.trusted_owner = match trusted_owner {
             None => core::TrustedOwner::Privileged,
             Some(v) => {
@@ -299,9 +313,16 @@ impl PyEventConsumer {
             other => other.map(Duration::from_secs_f64),
         };
         cfg.max_event_bytes = max_event_bytes;
-        let inner = core::EventConsumer::with_config(cfg).map_err(err)?;
+        let inner = core::EventConsumer::init_with(&path, move |c| {
+            let dir = std::mem::take(&mut c.dir);
+            *c = cfg;
+            c.dir = dir;
+        })
+        .map_err(err)?;
+        let endpoint = inner.endpoint();
         Ok(Self {
             inner: Mutex::new(Some(inner)),
+            endpoint,
         })
     }
 
@@ -320,6 +341,12 @@ impl PyEventConsumer {
                 });
             })
         })
+    }
+
+    /// Transport in use, e.g. "file: /path" or "ipc: XPC service com.example".
+    #[getter]
+    fn endpoint(&self) -> String {
+        self.endpoint.clone()
     }
 
     fn start_watching(&self, py: Python<'_>) -> PyResult<()> {

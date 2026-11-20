@@ -14,10 +14,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use deaddrop::{
-    ConsumerConfig, DetectionEvent, Error, EventConsumer, EventProducer, ProducerConfig,
-    TrustedOwner,
-};
+use deaddrop::{ConsumerConfig, DetectionEvent, Error, EventConsumer, EventProducer, TrustedOwner};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +28,7 @@ pub enum DdStatus {
     InvalidState = 6,
     Serialization = 7,
     Panic = 8,
+    Ipc = 9,
 }
 
 /// Owner policy for `dd_consumer_init_ex`.
@@ -58,8 +56,8 @@ pub struct DdEventView {
 pub type DdEventCallback =
     Option<unsafe extern "C" fn(event: *const DdEventView, user_data: *mut c_void)>;
 
-pub struct DdProducer(EventProducer);
-pub struct DdConsumer(EventConsumer);
+pub struct DdProducer(EventProducer, CString);
+pub struct DdConsumer(EventConsumer, CString);
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -80,6 +78,7 @@ fn status_of(err: &Error) -> DdStatus {
         Error::InsecureDirectory { .. } => DdStatus::InsecureDirectory,
         Error::InvalidConfig(_) => DdStatus::InvalidArgument,
         Error::Watcher(_) => DdStatus::Watcher,
+        Error::Ipc(_) => DdStatus::Ipc,
         Error::AlreadyWatching | Error::ShutDown => DdStatus::InvalidState,
         _ => DdStatus::Io,
     }
@@ -192,8 +191,9 @@ pub unsafe extern "C" fn dd_producer_init(
         ensure_logging();
         let out = out_ptr(out)?;
         let dir = str_arg(dir, "dir")?;
-        let p = EventProducer::with_config(ProducerConfig::new(dir))?;
-        *out = Box::into_raw(Box::new(DdProducer(p)));
+        let p = EventProducer::init(dir)?;
+        let endpoint = lossy_cstring(&p.endpoint());
+        *out = Box::into_raw(Box::new(DdProducer(p, endpoint)));
         Ok(())
     })
 }
@@ -242,6 +242,13 @@ pub unsafe extern "C" fn dd_producer_publish(
     })
 }
 
+/// Transport in use, e.g. "file: /path" or "ipc: named pipe \\.\pipe\name".
+/// Owned by the producer; valid until dd_producer_free. NULL if producer is NULL.
+#[no_mangle]
+pub unsafe extern "C" fn dd_producer_endpoint(producer: *const DdProducer) -> *const c_char {
+    producer.as_ref().map_or(ptr::null(), |p| p.1.as_ptr())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn dd_producer_shutdown(producer: *const DdProducer) -> DdStatus {
     guard(|| {
@@ -286,18 +293,21 @@ pub unsafe extern "C" fn dd_consumer_init_ex(
     guard(|| {
         ensure_logging();
         let out = out_ptr(out)?;
-        let mut cfg = ConsumerConfig::new(str_arg(dir, "dir")?);
-        cfg.trusted_owner = match trusted_owner {
+        let dir = str_arg(dir, "dir")?;
+        let policy = match trusted_owner {
             0 => TrustedOwner::Privileged,
             1 => TrustedOwner::CurrentUser,
             2 => TrustedOwner::Any,
             other => return Err(bad_arg(&format!("unknown trusted_owner {other}"))),
         };
-        cfg.replay_existing = replay_existing != 0;
-        cfg.rescan_interval = (rescan_interval_ms > 0)
-            .then(|| std::time::Duration::from_millis(rescan_interval_ms.into()));
-        let c = EventConsumer::with_config(cfg)?;
-        *out = Box::into_raw(Box::new(DdConsumer(c)));
+        let c = EventConsumer::init_with(dir, |cfg: &mut ConsumerConfig| {
+            cfg.trusted_owner = policy;
+            cfg.replay_existing = replay_existing != 0;
+            cfg.rescan_interval = (rescan_interval_ms > 0)
+                .then(|| std::time::Duration::from_millis(rescan_interval_ms.into()));
+        })?;
+        let endpoint = lossy_cstring(&c.endpoint());
+        *out = Box::into_raw(Box::new(DdConsumer(c, endpoint)));
         Ok(())
     })
 }
@@ -345,6 +355,12 @@ pub unsafe extern "C" fn dd_consumer_register_listener(
         })?;
         Ok(())
     })
+}
+
+/// Transport in use. Owned by the consumer; valid until dd_consumer_free.
+#[no_mangle]
+pub unsafe extern "C" fn dd_consumer_endpoint(consumer: *const DdConsumer) -> *const c_char {
+    consumer.as_ref().map_or(ptr::null(), |c| c.1.as_ptr())
 }
 
 #[no_mangle]
