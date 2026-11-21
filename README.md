@@ -1,22 +1,32 @@
 # deaddrop
 
-Local, near real time event exchange between endpoint applications on macOS and Windows, built as a single Rust core with Python and C/C++ bindings. The producer (a Python app) publishes events; native consumers (Rust or C++) receive them through an OS file system watcher. Neither side knows the other exists.
+Local, near real time event exchange between endpoint applications on macOS, Windows and Linux, built as a single Rust core with Python and C/C++ bindings. The producer (a Python app) publishes events; native consumers (Rust or C++) receive them. Neither side knows the other exists.
+
+Two transports carry the events, behind one API. A YAML file picks one at runtime, with no code changes:
+
+- **file** (default): each event is a file in a shared folder, written atomically and picked up by the OS file watcher. Durable and fan-out friendly.
+- **ipc**: events go straight to the consumer over the OS's own IPC: named pipes on Windows, XPC on macOS, Unix domain sockets on Linux. Nothing touches disk, and delivery measured about 30 times faster than the file transport on Linux and 170 times faster on Windows.
 
 ## Layout
 
 ```
 crates/
-  deaddrop/        Rust core: DetectionEvent, EventProducer, EventConsumer, file transport
-  deaddrop-ffi/    C ABI (libdeaddrop .dylib/.dll/.so + static lib)
+  deaddrop/          Rust core: DetectionEvent, EventProducer, EventConsumer
+    src/config.rs      YAML config: picks the transport at runtime
+    src/file/          file transport (atomic write + rename, OS file watcher)
+    src/ipc/           ipc transport: named_pipe.rs (Windows), xpc.rs (macOS), unix_socket.rs (Linux)
+    src/logging.rs     opt-in stderr logging (DEADDROP_LOG)
+  deaddrop-ffi/      C ABI (libdeaddrop .dylib/.dll/.so + static lib)
     include/deaddrop.h     C header
     include/deaddrop.hpp   header only C++17 RAII wrapper
-    examples/consumer.cpp      C++ consumer agent
+    examples/consumer.cpp  C++ consumer agent
+  deaddrop-py/       Python package deaddrop-ipc via PyO3 + maturin
 samples/
+  deaddrop.yaml        transport: file | ipc, for the samples
   python_publisher/    Python program that publishes events
   cpp_listener/        C++ program (CMake) that listens and collects
-  run_demo.sh          builds both and runs them together
-  deaddrop-py/     Python package deaddrop-ipc via PyO3 + maturin
-.github/workflows/ci.yml       tests on macOS, Windows, Linux; builds wheels
+  run_demo.sh          builds both and runs them together, with either transport
+.github/workflows/ci.yml   tests and both demos on macOS, Windows, Linux; builds wheels
 ```
 
 ## Run the samples (from a fresh clone)
@@ -139,7 +149,13 @@ Each `sent` line in terminal B shows up as a `recv` line in terminal A. When the
 samples/run_demo.sh 5
 ```
 
-It rebuilds anything missing, runs both programs against a fresh folder, and ends with `==> demo OK: listener received all 5 events`.
+It rebuilds anything missing, runs both programs, and ends with `==> demo OK (file): listener received all 5 events`. On Windows, run it in **Git Bash**, not WSL: Git Bash runs the Windows build (and named pipes), while WSL is Linux and would test the Linux build instead.
+
+**Choosing the transport.** Both ways above use the file transport. To switch:
+
+- `run_demo.sh`: set `transport: ipc` in [samples/deaddrop.yaml](samples/deaddrop.yaml), or override it for one run with `samples/run_demo.sh 5 ipc`. The first line of output says which transport and endpoint it used, for example `==> transport: ipc (named pipe \\.\pipe\com.deaddrop.demo)`.
+- Two terminals: add `--config samples/deaddrop.yaml` to both commands (or set `DEADDROP_CONFIG` to that file's full path in both terminals).
+- On macOS, an IPC listener must be started by launchd (see [macOS: the consumer runs under launchd](#macos-the-consumer-runs-under-launchd)). `run_demo.sh` registers it for you, so use the script there; a listener started by hand fails with an error explaining this.
 
 [samples/README.md](samples/README.md) shows sample output and every command line option.
 
@@ -153,30 +169,16 @@ It rebuilds anything missing, runs both programs against a fresh folder, and end
 | Windows: CMake `No CMAKE_CXX_COMPILER could be found` | Install Visual Studio Build Tools with **Desktop development with C++**, then open a new terminal |
 | `libdeaddrop not found` / `Missing ...deaddrop.dll.lib` from CMake | Run `cargo build --release -p deaddrop-ffi` first (step 4) |
 | Listener: `deaddrop error 4: insecure IPC directory ... lets group or others write` | Another tool loosened the folder's permissions. Delete `<temp>/deaddrop-demo` and let the publisher recreate it |
-| Listener stays on `waiting for ... to be created` | The publisher is using a different folder. Pass the same `--dir PATH` to both |
-
-## How it works
-
-```
-Producer (Python)                          shared dir (producer writes, consumers read)
-  publish_event(e)
-   1. validate + serialize JSON
-   2. create  .tmp-<nonce>.part            O_CREAT|O_EXCL  /  CREATE_NEW
-   3. write, fsync
-   4. rename -> evt-<seq:020>-<nonce>.json renamex_np(RENAME_EXCL) / MoveFileExW (no REPLACE)
-   5. fsync directory                                 │
-                                                      ▼ FSEvents / ReadDirectoryChangesW / inotify
-Consumer (Rust / C++)                      watcher thread wakes
-   6. list directory, pick unseen evt-*.json, skip temp and foreign files
-   7. read (size capped), parse, validate, check seq_id matches file name
-   8. sort batch by seq_id, call listeners
-```
-
-The OS notification is only a wakeup. The directory listing is the source of truth, so coalesced, duplicated or reordered notifications cannot cause missed or double deliveries. A periodic rescan (default 5 s) covers the case where the OS drops notifications entirely, which FSEvents can do under heavy load.
+| Listener stays on `waiting for ... to be created` | (file) The publisher is using a different folder. Pass the same `--dir PATH` to both |
+| Listener: `cannot listen on XPC service ... registered with launchd` | (ipc, macOS) The listener was started by hand. Use `samples/run_demo.sh 5 ipc`, or run it from a launchd plist |
+| Listener: `cannot create \\.\pipe\... (another consumer may already own this name)` | (ipc, Windows) Another listener is still running. Close it, or end `listener.exe` in Task Manager |
+| Listener: `another consumer is already listening on /tmp/....sock` | (ipc, Linux) Another listener is still running; stop it first |
+| Publisher prints `sent` but the listener shows nothing | (ipc) The listener is not running or uses another `ipc.name`; events wait in the publisher's memory until it connects. Run both with `--debug` to see the connection attempts |
+| Windows: the demo behaves like Linux (Unix socket, inotify) | You are in WSL. Open **Git Bash** from the Start menu instead; `uname -s` should print `MINGW64_...` |
 
 ## Transports: file or IPC
 
-Two implementations sit behind the same `EventProducer` / `EventConsumer` API. Which one runs is decided at runtime by a YAML file; producer and consumer code does not change.
+Both transports are fully supported on all three operating systems and sit behind the same `EventProducer` / `EventConsumer` API (Rust, Python, C and C++). Which one runs is decided at runtime by a YAML file; producer and consumer code does not change.
 
 | | `file` (default) | `ipc` |
 |---|---|---|
@@ -213,7 +215,26 @@ ipc:
 
 Unknown keys and values are errors, so a typo never silently falls back to the other transport. `endpoint()` (Rust), `.endpoint` (Python), `dd_producer_endpoint()` / `endpoint()` (C/C++) report what was chosen, e.g. `ipc: named pipe \\.\pipe\com.example.deaddrop`. [samples/deaddrop.yaml](samples/deaddrop.yaml) is a commented example.
 
-### How the IPC transport works
+## How the file transport works
+
+```
+Producer (Python)                          shared dir (producer writes, consumers read)
+  publish_event(e)
+   1. validate + serialize JSON
+   2. create  .tmp-<nonce>.part            O_CREAT|O_EXCL  /  CREATE_NEW
+   3. write, fsync
+   4. rename -> evt-<seq:020>-<nonce>.json renamex_np(RENAME_EXCL) / MoveFileExW (no REPLACE)
+   5. fsync directory                                 │
+                                                      ▼ FSEvents / ReadDirectoryChangesW / inotify
+Consumer (Rust / C++)                      watcher thread wakes
+   6. list directory, pick unseen evt-*.json, skip temp and foreign files
+   7. read (size capped), parse, validate, check seq_id matches file name
+   8. sort batch by seq_id, call listeners
+```
+
+The OS notification is only a wakeup. The directory listing is the source of truth, so coalesced, duplicated or reordered notifications cannot cause missed or double deliveries. A periodic rescan (default 5 s) covers the case where the OS drops notifications entirely, which FSEvents can do under heavy load.
+
+## How the IPC transport works
 
 The consumer listens; the producer connects. `publish_event` puts the event in a bounded in-memory queue and returns; a delivery thread sends it, connecting and reconnecting with backoff (50 ms up to 1 s), so a producer may start before its consumer. Events arrive in publish order. `shutdown()` waits up to `flush_timeout_ms` for the queue to drain, then drops what is left with a warning.
 
@@ -236,7 +257,9 @@ macOS only lets a process listen on an XPC Mach service that launchd registered 
 
 launchd then also starts the consumer on demand when a producer connects. `samples/run_demo.sh` writes and loads a plist like this for the length of the demo, and removes it afterwards. Producers need nothing special.
 
-## Guarantees (file transport)
+## Guarantees
+
+### File transport
 
 | Property | How |
 |---|---|
@@ -251,12 +274,36 @@ launchd then also starts the consumer on demand when a producer connects. `sampl
 
 Not guaranteed: delivery of events the producer pruned before a consumer read them. Retention defaults to 1,024 files and 24 hours.
 
+### IPC transport
+
+| Property | How |
+|---|---|
+| No partial messages | Named pipes and Unix sockets carry length-prefixed frames after a `DDP1` handshake; XPC carries whole dictionaries. A pipe or socket frame over `max_event_bytes` closes that connection; an oversized XPC message is ignored |
+| Ordering | Events from one producer arrive in publish order: one delivery thread per producer, one reader per connection, one dispatcher thread per consumer |
+| Delivery | At least once while both sides run. A send that fails is retried after reconnecting, so a consumer may see an event twice; be idempotent on `seq_id`, as with the file transport. XPC sends wait for the consumer's reply; pipe and socket sends count as delivered once the OS accepted the bytes |
+| Not durable | Undelivered events live in the producer's memory. They are lost if the producer process dies, if the queue overflows `ipc.max_pending` (oldest dropped first, with a warning), or if the consumer is still unreachable when `shutdown()`'s `ipc.flush_timeout_ms` runs out |
+| No back pressure | `publish_event` never blocks on the consumer; it only queues |
+| One consumer per endpoint | A second consumer on the same `ipc.name` is refused at `start_watching()` |
+| Isolation | Same as the file transport: a failing listener is caught and logged; delivery continues |
+
 ## Security model
+
+### File transport
 
 - **Producer** creates the directory with restrictive permissions: Unix `0755` dirs and `0644` files by default (configurable, for example `0750`/`0640` plus a `group` to restrict readers). Windows uses a protected DACL: SYSTEM and Administrators full control, Authenticated Users read. Modes that grant group or other write are rejected at configuration time.
 - **Consumer** refuses to start unless the directory is a real directory (not a symlink or junction), is not group/world writable (Unix), and is owned by a trusted account. Default trust is `Privileged`: root on Unix, SYSTEM or Administrators on Windows. That blocks directory squatting, where a local user pre-creates the path and feeds forged events.
 - **Per file**: consumers ignore non regular files, cap reads at `max_event_bytes` (1 MiB), validate schema, and reject files whose `seq_id` does not match the name.
 - **Known gap**: on Windows the consumer checks the directory owner, not the full DACL. Directories created by this library get a correct DACL; a directory provisioned by an installer must be locked down by that installer.
+
+### IPC transport
+
+- **Peer identity, both ways.** Before any event crosses, the consumer checks the account of the producer process and the producer checks the account of the consumer process, with the same `privileged` / `current_user` / `any` policies as the folder checks. The OS supplies the identity: `SO_PEERCRED` on Linux, the XPC peer's euid on macOS, and on Windows the client process token (consumer side) and the pipe's owner (producer side).
+- **No name squatting.** Windows pipes are created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so no other process can take the name while the consumer runs, and with `PIPE_REJECT_REMOTE_CLIENTS`. Producers open the pipe at identification level, so the consumer cannot impersonate them. On macOS only the launchd job that declares the service can listen on it. On Linux the consumer refuses a path that exists but is not a socket, a socket another consumer is listening on, or a stale socket owned by another account; it creates its socket `0600` unless the policy needs other accounts.
+- **Who may connect.** The Windows pipe's default DACL only lets SYSTEM, Administrators and the consumer's own account write (`trusted_peer: any` widens it to authenticated users).
+
+### Both
+
+- **Protect the config file.** Whoever can edit the YAML can switch the transport or loosen `trusted_peer`. Install it writable only by root, SYSTEM or Administrators; the library does not check the config file's own permissions.
 
 ## Integration: producer team (Python)
 
@@ -267,10 +314,15 @@ pip install ./crates/deaddrop-py     # from a clone, inside a venv; not on PyPI 
 ```python
 from deaddrop_ipc import EventProducer, DetectionEvent
 
-# 1. Initialize with the agreed-upon secure directory path
+# 1. Initialize: a shared folder (file transport), or a deaddrop.yaml that
+#    selects file or ipc. With DEADDROP_CONFIG set, the folder form also
+#    follows that config.
 producer = EventProducer.init("/var/run/vendor_ipc/events")
+print(producer.endpoint)   # e.g. "file: /var/run/vendor_ipc/events" or "ipc: XPC service com.example.deaddrop"
 
-# 2. Construct and publish events (atomic write + rename, GIL released during I/O)
+# 2. Construct and publish events
+#    file: atomic write + rename before it returns; ipc: queued for the delivery thread
+#    (the GIL is released during I/O either way)
 event = DetectionEvent(
     schema_version="1.0",
     seq_id=10492,
@@ -284,7 +336,7 @@ producer.publish_event(event)
 producer.shutdown()
 ```
 
-`schema_version` and `timestamp_utc` are optional (they default to `"1.0"` and now). `EventProducer` is also a context manager. Options: `durable`, `max_files`, `max_age_seconds`, `max_event_bytes`, `dir_mode`, `file_mode`, `group`. Errors raise `InvalidEventError`, `InsecureDirectoryError`, `ShutDownError` (all subclass `IpcError`). A Python `EventConsumer` with the same API as the Rust one is included for tests and tooling.
+`schema_version` and `timestamp_utc` are optional (they default to `"1.0"` and now). `EventProducer` is also a context manager. Keyword options `durable`, `max_files`, `max_age_seconds`, `max_event_bytes`, `dir_mode`, `file_mode` and `group` tune the file transport and are ignored when the config selects `ipc` (the `ipc:` section of the YAML tunes that one). Errors raise `InvalidEventError`, `InsecureDirectoryError`, `ShutDownError` or, for IPC failures, `IpcError` itself (the others subclass it). A Python `EventConsumer` with the same API as the Rust one is included for tests and tooling.
 
 ## Integration: consumer team (Rust)
 
@@ -293,15 +345,17 @@ use deaddrop::{EventConsumer, DetectionEvent, Result};
 use std::path::PathBuf;
 
 fn run_consumer() -> Result<()> {
-    // 1. Initialize targeting the agreed-upon directory
+    // 1. Initialize: a shared folder (file transport), or a deaddrop.yaml
+    //    that selects file or ipc (DEADDROP_CONFIG works too)
     let mut consumer = EventConsumer::init(PathBuf::from("/var/run/vendor_ipc/events"))?;
+    println!("receiving via {}", consumer.endpoint());
 
-    // 2. Register the handler, called on the watcher thread
+    // 2. Register the handler, called on the transport's thread
     consumer.register_event_listener(|event: DetectionEvent| {
         println!("Received event {}: {}", event.seq_id, event.app_name);
     })?;
 
-    // 3. Start the OS-native watcher (returns immediately)
+    // 3. Start the file watcher or the IPC listener (returns immediately)
     consumer.start_watching()?;
 
     // ... run the agent ...
@@ -311,48 +365,63 @@ fn run_consumer() -> Result<()> {
 }
 ```
 
-Use `EventConsumer::with_config(ConsumerConfig { .. })` to set `trusted_owner`, `replay_existing`, `rescan_interval` and `max_event_bytes`.
+To set `trusted_owner`, `replay_existing`, `rescan_interval` or `max_event_bytes` while still honouring the YAML, use `EventConsumer::init_with(target, |cfg| cfg.trusted_owner = TrustedOwner::Privileged)`. With IPC, `trusted_owner` is the policy for the connecting producer (unless the YAML sets `ipc.trusted_peer`) and `max_event_bytes` still applies; the folder options are unused. `EventConsumer::with_config` always builds the file transport, and `EventProducer::init_with` does the same job on the producer side.
 
 ## Integration: consumer team (C++)
 
 ```cpp
 #include "deaddrop.hpp"
 
+// A shared folder (file transport), or a deaddrop.yaml that selects file or ipc.
 deaddrop::Consumer consumer("/var/run/vendor_ipc/events");
+std::printf("receiving via %s\n", consumer.endpoint().c_str());
 consumer.register_event_listener([](const deaddrop::DetectionEvent &e) {
     // e.seq_id, e.app_name, e.metadata_json (JSON object), e.event_json
 });
 consumer.start_watching();
 // ...
-consumer.shutdown();   // joins the watcher thread; the destructor does this too
+consumer.shutdown();   // joins the transport's thread; the destructor does this too
 ```
 
-Link with `-ldeaddrop`. For static linking, see the system libraries listed at the top of `deaddrop.h`. The plain C API (`dd_consumer_init`, `dd_consumer_register_listener`, ...) is in the same header.
+Link with `-ldeaddrop`. For static linking, see the system libraries listed at the top of `deaddrop.h`. The plain C API (`dd_consumer_init`, `dd_consumer_register_listener`, `dd_consumer_endpoint`, ...) is in the same header. IPC failures return `DD_ERR_IPC`.
 
-## Deployment paths
+## Deployment
 
-| OS | Suggested directory | Note |
-|---|---|---|
-| macOS | `/Library/Application Support/<Vendor>/ipc/events` | `/var/run` is cleared at boot; fine if events only matter while both apps run |
-| Windows | `C:\ProgramData\<Vendor>\ipc\events` | Producer service as LocalSystem creates it with the protected DACL |
+Both sides must use the same transport, and the same folder (file) or `ipc.name` (ipc). Ship one config file and point both programs at it with `DEADDROP_CONFIG` (or pass its path to `init()`).
 
-Both sides must be configured with the same path. The producer must start (or the installer must create the directory) before a consumer starts watching; a consumer refuses a missing directory.
+| OS | Config file | Shared folder (file) | IPC endpoint | How the programs get `DEADDROP_CONFIG` |
+|---|---|---|---|---|
+| macOS | `/Library/Application Support/<Vendor>/deaddrop.yaml` | `/Library/Application Support/<Vendor>/ipc/events` | XPC service `com.<vendor>.deaddrop` | `EnvironmentVariables` in each launchd plist; the consumer's plist also lists the service under `MachServices` |
+| Windows | `C:\ProgramData\<Vendor>\deaddrop.yaml` | `C:\ProgramData\<Vendor>\ipc\events` | `\\.\pipe\com.<vendor>.deaddrop` | the services' environment, or system wide with `setx /M DEADDROP_CONFIG <path>` |
+| Linux | `/etc/<vendor>/deaddrop.yaml` | `/var/lib/<vendor>/events` | `/tmp/com.<vendor>.deaddrop.sock` | `Environment=` in the systemd units |
+
+Install the config writable only by root, SYSTEM or Administrators (see [Security model](#security-model)) and set `ipc.trusted_peer: privileged`.
+
+- **file:** the producer must start first, or the installer must create the folder; a consumer refuses a missing folder. On macOS, `/var/run` is cleared at boot, which is fine only if events matter just while both apps run. On Windows, a producer running as LocalSystem creates the folder with the protected DACL.
+- **ipc:** either side may start first; the producer holds events until the consumer is listening. On macOS, launchd starts the consumer when a producer first connects if its plist declares the service.
 
 ## Build and test
 
 Requires Rust 1.91 or newer (set by the `notify` file watcher dependency). Check with `rustc --version`; upgrade with `rustup update stable`.
 
 ```bash
-cargo test                                          # core + C ABI tests
+cargo test                                          # core (file + ipc) + C ABI tests
 cargo build --release -p deaddrop-ffi           # target/release/libdeaddrop.*
 cd crates/deaddrop-py && maturin build --release   # wheel in target/wheels
 cd crates/deaddrop-py && maturin develop && pytest tests
-cargo run --release --example latency -p deaddrop -- 2000
+cargo run --release --example latency -p deaddrop -- 2000         # file transport
+cargo run --release --example latency -p deaddrop -- 2000 --ipc   # ipc (not on macOS: needs launchd)
 ```
+
+`cargo test` runs the IPC tests on Linux and Windows. On macOS they are skipped, because an XPC listener cannot run under `cargo test` without launchd; a macOS-only test checks the explanatory error instead, and CI covers XPC end to end with `samples/run_demo.sh 5 ipc`, which runs the listener under launchd.
 
 ## Diagnostic logging
 
-The library logs each step of an exchange through the Rust `log` crate, under two targets, `deaddrop::producer` and `deaddrop::consumer`. At `debug` level that covers: which directory and temp file the producer writes, the flush to disk, the atomic rename and the final file name; and on the consumer side, the watcher backend in use, each OS notification, in-flight temp files it skips, which file it reads, and each event it delivers.
+The library logs each step of an exchange through the Rust `log` crate, under two targets, `deaddrop::producer` and `deaddrop::consumer`. At `debug` level that covers:
+
+- **Both transports:** which config file was read and which transport and endpoint it selected; each event received and delivered to listeners.
+- **file:** which directory and temp file the producer writes, the flush to disk, the atomic rename and the final file name; on the consumer side, the watcher backend in use, each OS notification, in-flight temp files it skips, and which file it reads.
+- **ipc:** each event queued and delivered, with timings; connection attempts while the consumer is unreachable, reconnects, and who is on the other end (process id, plus the account on Linux and macOS); the shutdown flush.
 
 | Where | How to turn it on | Output |
 |---|---|---|
@@ -368,20 +437,23 @@ Levels: `off`, `error`, `warn` (default), `info`, `debug`, `trace` (adds data-wr
 
 `samples/run_demo.sh` turns this on and colour codes it; see [Behind the scenes](samples/README.md#behind-the-scenes).
 
-## Measured (Linux container, overlay fs, inotify; 3,000 samples)
+## Measured
 
-| | p50 | p95 | p99 |
+Publish to callback, through the real OS mechanism, from the `latency` example (`--ipc` for the IPC transport):
+
+| Where | Samples | file p50 / p95 | ipc p50 / p95 |
 |---|---|---|---|
-| `publish_event`, fsync on | 0.96 ms | 1.46 ms | 8.6 ms |
-| `publish_event`, fsync off | 0.49 ms | 0.73 ms | 3.0 ms |
-| publish to callback, fsync on | 1.30 ms | 2.12 ms | 2.5 ms |
+| Linux (build container, inotify / Unix socket) | 3,000 | 1.23 / 2.12 ms | 0.043 / 0.057 ms |
+| Windows (CI runner, `ReadDirectoryChangesW` / named pipe) | 1,000 | 8.44 / 12.04 ms | 0.050 / 0.067 ms |
+| macOS (CI runner, FSEvents / XPC) | 1,000 | 13.3 / 16.9 ms | not benchmarked; each XPC send took 0.09 to 0.31 ms in the demo logs |
 
-Treat these as a sanity check, not a macOS or Windows number. FSEvents and `ReadDirectoryChangesW` have different latency profiles; run the `latency` example on target hardware (CI does on each push).
+`publish_event` itself returns after 0.84 ms (file, with fsync) or 0.009 ms (ipc, queued) at p50 on Linux. Where the file transport's time goes differs by OS: on Windows it is mostly the flush to disk, on macOS mostly FSEvents batching notifications. CI runners are shared virtual machines, so treat these numbers as an upper bound and run the `latency` example on your own hardware.
 
 ## Differences from the proposal
 
-- `start_watching()` is non blocking: it spawns the watcher thread and returns. The proposal's step 4 (`shutdown`) only makes sense that way.
-- `publish_event` is synchronous, not fire and forget. It returns once the event is durable and visible, typically about 1 ms. Making it async would mean an unacknowledged in-memory queue that can lose events on crash.
+- `start_watching()` is non blocking: it starts the file watcher or the IPC listener on a background thread and returns. The proposal's step 4 (`shutdown`) only makes sense that way.
+- The proposal planned to swap the file backend for named pipes or AF_UNIX sockets later "with zero API changes". That is now the `ipc` transport, chosen per deployment in YAML, with XPC instead of AF_UNIX on macOS, where XPC is the native mechanism.
+- `publish_event` with the **file** transport is synchronous, not fire and forget: it returns once the event is durable and visible, typically about 1 ms. With **ipc** it is non blocking, as the proposal described, at the cost of losing queued events if the producer dies.
 - Added: retention (the proposal did not say who deletes files; consumers are read only, so the producer prunes), directory trust checks on the consumer, a periodic safety rescan, size limits, and `seq_id`/file name cross checks.
 - The doc's code samples had small errors, fixed here: `rom endpoint_ipc import` (missing `f`; the library was then called endpoint-ipc), the Rust consumer was missing `Ok(())`/closing brace, and two sections were numbered 2.
 
@@ -391,6 +463,9 @@ The YAML config switches between the two built-in transports. For anything else,
 
 ## Known limitations and next steps
 
-- Each wakeup lists the whole directory: O(files on disk), bounded by retention at about 1,100 files. If retention is raised a lot, switch to the paths carried in the notification and keep full scans for the periodic rescan.
-- Windows DACL inspection on the consumer side (owner only today).
-- Only the Linux paths were executed in this build environment. The macOS and Windows code type-checks and lints clean on both targets, and the CI workflow runs the full suite on real macOS and Windows runners.
+- **file:** each wakeup lists the whole directory: O(files on disk), bounded by retention at about 1,100 files. If retention is raised a lot, switch to the paths carried in the notification and keep full scans for the periodic rescan.
+- **file:** on Windows the consumer checks the folder's owner, not its full DACL.
+- **ipc:** one consumer per endpoint name, and no persistence: events queued in a producer that dies are lost. Use the file transport where either matters.
+- **ipc, macOS:** the consumer must run under launchd, which also means its IPC path cannot be exercised by `cargo test`; CI covers it through the launchd demo.
+- **ipc, Linux:** sockets live in `/tmp`; a configurable socket directory would suit hardened systems better.
+- **Both:** the library does not check the permissions of the config file itself.
