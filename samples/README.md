@@ -105,7 +105,7 @@ Listener exit codes: `0` success, `1` error (for example an insecure directory),
 - **yellow** `| [deaddrop:producer] ...`: inside the Python publisher
 - **cyan** `| [deaddrop:consumer] ...`: inside the C++ listener
 
-One event, start to finish (abridged):
+One event, start to finish, with the **file** transport (abridged):
 
 ```
       | [deaddrop:producer] DEBUG seq=…596 writing 217 bytes to temp file /tmp/deaddrop-demo-2336/events/.tmp-6d2c6f110d4a4efe.part (hidden from consumers until renamed)
@@ -121,6 +121,25 @@ One event, start to finish (abridged):
       | [deaddrop:producer] DEBUG seq=…596 rename done in 0.04 ms: event is now visible to consumers as /tmp/deaddrop-demo-2336/events/evt-00000001795191140596-e596d224d3c7bdad.json (publish took 1.40 ms)
 [publisher] sent seq=…596 app='Adatum Reports' ...
 ```
+
+And with the **ipc** transport (`samples/run_demo.sh 5 ipc` on Linux; on Windows the endpoint is `named pipe \\.\pipe\com.deaddrop.demo`, on macOS `XPC service com.deaddrop.demo`):
+
+```
+      | [deaddrop:consumer] DEBUG config /tmp/deaddrop-demo-18886/deaddrop.yaml: transport=ipc (Unix socket /tmp/com.deaddrop.demo.sock)
+      | [deaddrop:consumer] DEBUG IPC transport: listening on Unix socket /tmp/com.deaddrop.demo.sock (producers must be CurrentUser)
+[listener] receiving via ipc: Unix socket /tmp/com.deaddrop.demo.sock (Ctrl+C to stop)
+      | [deaddrop:producer] DEBUG IPC transport: will deliver to Unix socket /tmp/com.deaddrop.demo.sock (consumer must be CurrentUser; queue up to 1024 events while it is unreachable)
+[publisher] sending via ipc: Unix socket /tmp/com.deaddrop.demo.sock
+      | [deaddrop:producer] DEBUG seq=…197 queued 217 bytes for Unix socket /tmp/com.deaddrop.demo.sock (1 pending)
+      | [deaddrop:producer] DEBUG connected to Unix socket /tmp/com.deaddrop.demo.sock (consumer pid 18894 uid 0)
+      | [deaddrop:producer] DEBUG seq=…197 delivered 217 bytes to Unix socket /tmp/com.deaddrop.demo.sock in 0.00 ms (queued 0.09 ms before that)
+      | [deaddrop:consumer] DEBUG accepted connection from producer pid 18897 uid 0
+      | [deaddrop:consumer] DEBUG received event seq=…197 app="Contoso Mail" (217 bytes) from producer pid 18897 uid 0
+      | [deaddrop:consumer] DEBUG delivering seq=…197 to 1 listener(s)
+[listener] recv #1 seq=…197 app='Contoso Mail' ...
+```
+
+No files, temp names or renames: the producer queues the event, its delivery thread sends it over the connection, and the consumer checks who connected before accepting anything. On macOS the listener's lines come from the launchd agent's log, streamed into the demo, and the script first prints `(listener started by launchd as gui/501/...)`.
 
 Real lines also carry a timestamp and process id, for example `[deaddrop:consumer] 16:12:20.799 DEBUG pid=2341 ...`. The consumer often reads the file before the producer logs "rename done": the rename is instant, and the producer is still flushing the directory entry to disk.
 
